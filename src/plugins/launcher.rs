@@ -73,7 +73,7 @@ impl Plugin for Launcher {
                 s += 6;
             }
             // Ligera penalización por profundidad: lo cercano a la raíz suele ser lo buscado.
-            s -= (root.files.dir_of(e).matches('\\').count() as i32).min(12);
+            s -= (root.files.dir_of(e).matches(std::path::MAIN_SEPARATOR).count() as i32).min(12);
             let (bonus, strong) = quality(name, &lower);
             s += if strong { bonus } else { -30 };
             let mut it = Item::new(
@@ -110,7 +110,7 @@ fn search_files(q: &Query, pattern: &Pattern) -> Vec<(u32, usize, usize)> {
                 .collect::<Vec<_>>()
         })
         .collect();
-    all.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    all.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
     all.truncate(TOP_K);
     all
 }
@@ -125,11 +125,11 @@ fn top_k_chunk(files: &FileIndex, chunk: &[FileEntry], base: usize, pattern: &Pa
             if let Some(s) = pattern.score(hay, matcher) {
                 if heap.len() < TOP_K {
                     heap.push(Reverse((s, base + i)));
-                } else if let Some(Reverse((min, _))) = heap.peek() {
-                    if s > *min {
-                        heap.pop();
-                        heap.push(Reverse((s, base + i)));
-                    }
+                } else if let Some(Reverse((min, _))) = heap.peek()
+                    && s > *min
+                {
+                    heap.pop();
+                    heap.push(Reverse((s, base + i)));
                 }
             }
         }

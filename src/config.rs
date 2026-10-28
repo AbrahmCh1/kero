@@ -64,22 +64,30 @@ impl Default for Config {
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
-            roots: vec![
-                "~\\Desktop".into(),
-                "~\\Documents".into(),
-                "~\\Downloads".into(),
-                "~\\Pictures".into(),
-                "~\\Videos".into(),
-                "~\\Music".into(),
-                "~\\OneDrive".into(),
-            ],
+            roots: default_roots(),
             exclude: [
-                "node_modules", ".git", ".svn", ".hg", "target", "__pycache__", ".venv", "venv",
-                ".cache", ".gradle", ".idea", ".vs", "obj", "$RECYCLE.BIN",
-                "System Volume Information", "AppData",
+                "node_modules",
+                ".git",
+                ".svn",
+                ".hg",
+                "target",
+                "__pycache__",
+                ".venv",
+                "venv",
+                ".cache",
+                ".gradle",
+                ".idea",
+                ".vs",
+                "obj",
+                "$RECYCLE.BIN",
+                "System Volume Information",
+                "AppData",
+                ".Trash",
             ]
+            .into_iter()
+            .chain(cfg!(target_os = "macos").then_some("Library"))
             .map(String::from)
-            .to_vec(),
+            .collect(),
             exclude_ext: ["tmp", "crdownload", "part", "lock"].map(String::from).to_vec(),
             skip_hidden: true,
             max_depth: 14,
@@ -88,22 +96,56 @@ impl Default for IndexConfig {
     }
 }
 
+fn default_roots() -> Vec<String> {
+    let mut dirs = vec!["Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music"];
+    if cfg!(windows) {
+        dirs.push("OneDrive");
+    }
+    if cfg!(target_os = "macos") {
+        dirs.retain(|d| *d != "Videos");
+        dirs.push("Movies");
+    }
+    dirs.into_iter().map(|d| format!("~{}{d}", std::path::MAIN_SEPARATOR)).collect()
+}
+
 fn engine(k: &str, n: &str, u: &str) -> WebEngine {
     WebEngine { keyword: k.into(), name: n.into(), url: u.into() }
 }
 
-pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| ".".into());
-    let dir = base.join("Kero");
+pub fn home_dir() -> PathBuf {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| ".".into())
+}
+
+fn ensure(dir: PathBuf) -> PathBuf {
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
 
+fn env_dir(var: &str, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(fallback)
+}
+
+/// Índice, caché y estadísticas de uso (se pueden borrar sin perder nada).
+pub fn data_dir() -> PathBuf {
+    if cfg!(windows) {
+        ensure(env_dir("LOCALAPPDATA", || ".".into()).join("Kero"))
+    } else if cfg!(target_os = "macos") {
+        ensure(home_dir().join("Library/Application Support/Kero"))
+    } else {
+        ensure(env_dir("XDG_DATA_HOME", || home_dir().join(".local/share")).join("kero"))
+    }
+}
+
+/// Configuración del usuario (`config.toml`).
 pub fn config_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| ".".into());
-    let dir = base.join("Kero");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+    if cfg!(windows) {
+        ensure(env_dir("APPDATA", || ".".into()).join("Kero"))
+    } else if cfg!(target_os = "macos") {
+        ensure(home_dir().join("Library/Application Support/Kero"))
+    } else {
+        ensure(env_dir("XDG_CONFIG_HOME", || home_dir().join(".config")).join("kero"))
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -136,13 +178,7 @@ impl Config {
     }
 
     pub fn resolved_roots(&self) -> Vec<PathBuf> {
-        let mut roots: Vec<PathBuf> = self
-            .index
-            .roots
-            .iter()
-            .map(|r| expand_path(r))
-            .filter(|p| p.is_dir())
-            .collect();
+        let mut roots: Vec<PathBuf> = self.index.roots.iter().map(|r| expand_path(r)).filter(|p| p.is_dir()).collect();
         roots.sort();
         // Quita raíces anidadas dentro de otra raíz para no indexar dos veces.
         let mut out: Vec<PathBuf> = Vec::new();
@@ -158,8 +194,7 @@ impl Config {
 pub fn expand_path(raw: &str) -> PathBuf {
     let mut s = raw.trim().to_string();
     if let Some(rest) = s.strip_prefix('~') {
-        let home = std::env::var("USERPROFILE").unwrap_or_default();
-        s = format!("{home}{rest}");
+        s = format!("{}{rest}", home_dir().display());
     }
     // Expande %VAR%
     let mut out = String::new();
@@ -192,10 +227,9 @@ pub fn expand_path(raw: &str) -> PathBuf {
 
 pub fn display_path(p: &Path) -> String {
     let s = p.to_string_lossy().to_string();
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        if let Some(rest) = s.strip_prefix(&home) {
-            return format!("~{rest}");
-        }
+    let home = home_dir().to_string_lossy().into_owned();
+    match s.strip_prefix(&home) {
+        Some(rest) if home.len() > 1 => format!("~{rest}"),
+        _ => s,
     }
-    s
 }

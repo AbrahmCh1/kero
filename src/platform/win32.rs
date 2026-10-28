@@ -1,7 +1,10 @@
-//! Helpers finos sobre Win32.
+//! Implementación Windows de la capa de plataforma (Win32).
+
+use super::Ipc;
+use crate::plugins::SystemCmd;
 
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::{CloseHandle, COLORREF, HANDLE, HWND, POINT, RECT, SIZE};
+use windows::Win32::Foundation::{COLORREF, CloseHandle, HANDLE, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CreateCompatibleDC,
     CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ,
@@ -14,21 +17,18 @@ use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenC
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RRF_RT_REG_DWORD, RegCloseKey, RegDeleteValueW,
-    RegGetValueW, RegOpenKeyExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RRF_RT_REG_DWORD, RegCloseKey, RegDeleteValueW, RegGetValueW,
+    RegOpenKeyExW, RegSetValueExW,
 };
 use windows::Win32::System::Threading::{
     CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, GetCurrentProcess, INFINITE, OpenEventW, OpenMutexW,
-    SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject,
+    SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForMultipleObjects,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Shell::{
-    FileOpenDialog, FOS_PICKFOLDERS, IFileOpenDialog, SIGDN_FILESYSPATH, ShellExecuteW,
-};
+use windows::Win32::UI::Shell::{FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, SW_HIDE,
-    SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOSIZE, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    ULW_ALPHA, UpdateLayeredWindow, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    GWL_EXSTYLE, GetCursorPos, GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, SW_HIDE, SW_SHOWNORMAL, SWP_NOACTIVATE,
+    SWP_NOSIZE, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -166,18 +166,10 @@ pub fn hide(hwnd: Hwnd) {
     }
 }
 
-pub fn is_foreground(hwnd: Hwnd) -> bool {
-    unsafe { GetForegroundWindow() == hwnd.h() }
-}
-
 /// Tamaño de icono pequeño (bandeja) según el DPI del sistema.
 pub fn small_icon_size() -> (u32, u32) {
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON, SM_CYSMICON};
     unsafe { (GetSystemMetrics(SM_CXSMICON) as u32, GetSystemMetrics(SM_CYSMICON) as u32) }
-}
-
-pub fn dpi_scale(hwnd: Hwnd) -> f32 {
-    unsafe { GetDpiForWindow(hwnd.h()) as f32 / 96.0 }
 }
 
 pub fn shell_execute(verb: Option<&str>, file: &str, args: &str, dir: Option<&Path>) -> bool {
@@ -202,7 +194,7 @@ pub fn open(target: &str) -> bool {
     shell_execute(None, target, "", None)
 }
 
-pub fn reveal_in_explorer(path: &Path) {
+pub fn reveal(path: &Path) {
     let arg = format!("/select,\"{}\"", path.display());
     shell_execute(None, "explorer.exe", &arg, None);
 }
@@ -294,8 +286,8 @@ pub fn acquire_single_instance() -> bool {
     unsafe {
         match CreateMutexW(None, true, INSTANCE_MUTEX) {
             Ok(_h) => {
-                let already = windows::Win32::Foundation::GetLastError()
-                    == windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+                let already =
+                    windows::Win32::Foundation::GetLastError() == windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
                 // HANDLE no se cierra al salir de ámbito: el mutex vive lo que el proceso.
                 !already
             }
@@ -304,34 +296,58 @@ pub fn acquire_single_instance() -> bool {
     }
 }
 
-const QUIT_EVENT: PCWSTR = w!("Local\\KeroLauncher.Quit");
 const INSTANCE_MUTEX: PCWSTR = w!("Local\\KeroLauncher.SingleInstance");
+const QUIT_EVENT: PCWSTR = w!("Local\\KeroLauncher.Quit");
+const TOGGLE_EVENT: PCWSTR = w!("Local\\KeroLauncher.Toggle");
 
-/// Hilo que espera la orden de cierre de otro proceso (instalador/desinstalador).
-pub fn listen_for_quit(on_quit: impl FnOnce() + Send + 'static) {
-    let Ok(ev) = (unsafe { CreateEventW(None, true, false, QUIT_EVENT) }) else { return };
-    let ev = ev.0 as isize;
+/// Escucha órdenes de otros procesos de Kero (`--quit`, `--toggle`, segundo arranque).
+pub fn ipc_listen(handler: impl Fn(Ipc) + Send + 'static) {
+    let (Ok(quit), Ok(toggle)) = (unsafe { CreateEventW(None, false, false, QUIT_EVENT) }, unsafe {
+        CreateEventW(None, false, false, TOGGLE_EVENT)
+    }) else {
+        return;
+    };
+    let (q, t) = (quit.0 as isize, toggle.0 as isize);
     std::thread::spawn(move || {
-        unsafe { WaitForSingleObject(HANDLE(ev as *mut _), INFINITE) };
-        on_quit();
+        let handles = [HANDLE(q as *mut _), HANDLE(t as *mut _)];
+        loop {
+            let r = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+            match r.0 {
+                0 => handler(Ipc::Quit),
+                1 => handler(Ipc::Toggle),
+                _ => return,
+            }
+        }
     });
 }
 
-/// Pide a la instancia abierta que se cierre y espera (máx. 3 s) a que lo haga.
-pub fn quit_running_instance() {
+/// Envía una orden a la instancia abierta. `false` si no hay ninguna escuchando.
+pub fn ipc_send(msg: Ipc) -> bool {
+    let name = match msg {
+        Ipc::Quit => QUIT_EVENT,
+        Ipc::Toggle => TOGGLE_EVENT,
+    };
     unsafe {
-        if let Ok(ev) = OpenEventW(EVENT_MODIFY_STATE, false, QUIT_EVENT) {
-            let _ = SetEvent(ev);
-            let _ = CloseHandle(ev);
-        }
-        for _ in 0..30 {
-            match OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, INSTANCE_MUTEX) {
-                Ok(m) => {
-                    let _ = CloseHandle(m);
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                Err(_) => return,
+        match OpenEventW(EVENT_MODIFY_STATE, false, name) {
+            Ok(ev) => {
+                let _ = SetEvent(ev);
+                let _ = CloseHandle(ev);
+                true
             }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Espera (máx. 3 s) a que la instancia abierta termine.
+pub fn wait_until_closed() {
+    for _ in 0..30 {
+        match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, INSTANCE_MUTEX) } {
+            Ok(m) => {
+                let _ = unsafe { CloseHandle(m) };
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => return,
         }
     }
 }
@@ -360,21 +376,49 @@ pub fn trim_working_set() {
     }
 }
 
-pub fn lock_workstation() {
-    unsafe {
-        let _ = windows::Win32::System::Shutdown::LockWorkStation();
+/// Ejecuta un programa; `admin` lo eleva con UAC.
+pub fn run(exe: &str, args: &str, admin: bool) {
+    shell_execute(admin.then_some("runas"), exe, args, None);
+}
+
+pub fn launch_app(id: &str, path: Option<&str>, admin: bool) {
+    match (admin, path) {
+        (true, Some(p)) => run(p, "", true),
+        _ => {
+            open(&format!("shell:AppsFolder\\{id}"));
+        }
     }
 }
 
-pub fn suspend(hibernate: bool) {
-    unsafe {
-        let _ = windows::Win32::System::Power::SetSuspendState(hibernate, false, false);
-    }
+pub fn run_in_terminal(cmd: &str, admin: bool) {
+    let home = std::env::var("USERPROFILE").ok().map(PathBuf::from);
+    shell_execute(admin.then_some("runas"), "cmd.exe", &format!("/k {cmd}"), home.as_deref());
 }
 
-pub fn empty_recycle_bin() {
-    unsafe {
+pub fn run_system(cmd: SystemCmd) {
+    match cmd {
+        SystemCmd::Lock => unsafe {
+            let _ = windows::Win32::System::Shutdown::LockWorkStation();
+        },
+        SystemCmd::Sleep | SystemCmd::Hibernate => unsafe {
+            let _ = windows::Win32::System::Power::SetSuspendState(cmd == SystemCmd::Hibernate, false, false);
+        },
+        SystemCmd::Shutdown => run("shutdown.exe", "/s /t 0", false),
+        SystemCmd::Restart => run("shutdown.exe", "/r /t 0", false),
+        SystemCmd::SignOut => run("shutdown.exe", "/l", false),
         // Sin SHERB_NOCONFIRMATION: Windows pide confirmación.
-        let _ = windows::Win32::UI::Shell::SHEmptyRecycleBinW(None, PCWSTR::null(), 0);
+        SystemCmd::EmptyTrash => unsafe {
+            let _ = windows::Win32::UI::Shell::SHEmptyRecycleBinW(None, PCWSTR::null(), 0);
+        },
     }
+}
+
+/// Fuentes del sistema: (texto, seminegrita, iconos). Rutas absolutas, en orden de preferencia.
+pub fn font_candidates() -> [Vec<PathBuf>; 3] {
+    let dir = PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into())).join("Fonts");
+    [
+        vec![dir.join("segoeui.ttf")],
+        vec![dir.join("seguisb.ttf")],
+        vec![dir.join("SegoeIcons.ttf"), dir.join("segmdl2.ttf")],
+    ]
 }

@@ -34,9 +34,7 @@ impl Hotkey {
                 if m.register(fb).is_ok() {
                     self.current = Some(fb);
                 }
-                self.error = Some(format!(
-                    "{spec} ocupado (¿PowerToys?) · usando Ctrl+Alt+Espacio"
-                ));
+                self.error = Some(format!("{spec} ocupado (¿PowerToys?) · usando Ctrl+Alt+Espacio"));
             }
             Err(_) => self.error = Some(format!("Atajo inválido: \u{201C}{spec}\u{201D}")),
         }

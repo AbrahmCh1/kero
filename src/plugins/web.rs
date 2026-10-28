@@ -1,7 +1,7 @@
 //! Búsquedas web por palabra clave ("g gatos", "yt lofi"), apertura de URLs
 //! escritas a mano y una búsqueda web de respaldo al final de la lista.
 
-use super::{Action, Icon, Item, Mode, Plugin, Query, glyph};
+use super::{Action, Glyph, Icon, Item, Mode, Plugin, Query};
 
 pub struct Web;
 
@@ -60,7 +60,7 @@ impl Plugin for Web {
                 out.push(Item::new(
                     if rest.is_empty() { format!("Buscar en {}", engine.name) } else { rest.to_string() },
                     format!("Buscar en {}", engine.name),
-                    Icon::Glyph(glyph::GLOBE),
+                    Icon::Glyph(Glyph::Globe),
                     Action::Url(url),
                     9_000,
                 ));
@@ -68,20 +68,26 @@ impl Plugin for Web {
         }
 
         if let Some(url) = as_url(q.text) {
-            out.push(Item::new(q.text.trim(), "Abrir en el navegador", Icon::Glyph(glyph::LINK), Action::Url(url), 8_000));
+            out.push(Item::new(
+                q.text.trim(),
+                "Abrir en el navegador",
+                Icon::Glyph(Glyph::Link),
+                Action::Url(url),
+                8_000,
+            ));
         }
 
         // Respaldo: siempre al final.
-        if let Some(engine) = q.cfg.web_engines.first() {
-            if q.text.chars().count() >= 2 {
-                out.push(Item::new(
-                    format!("Buscar \u{201C}{}\u{201D}", q.text.trim()),
-                    format!("en {}", engine.name),
-                    Icon::Glyph(glyph::SEARCH),
-                    Action::Url(engine.url.replace("{q}", &encode(q.text.trim()))),
-                    i32::MIN / 2,
-                ));
-            }
+        if let Some(engine) = q.cfg.web_engines.first()
+            && q.text.chars().count() >= 2
+        {
+            out.push(Item::new(
+                format!("Buscar \u{201C}{}\u{201D}", q.text.trim()),
+                format!("en {}", engine.name),
+                Icon::Glyph(Glyph::Search),
+                Action::Url(engine.url.replace("{q}", &encode(q.text.trim()))),
+                i32::MIN / 2,
+            ));
         }
     }
 }

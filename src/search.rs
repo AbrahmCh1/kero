@@ -59,7 +59,7 @@ impl Engine {
         for p in &self.plugins {
             p.query(&q, &mut out);
         }
-        out.sort_by(|a, b| b.score.cmp(&a.score));
+        out.sort_by_key(|a| std::cmp::Reverse(a.score));
         // Si hay suficientes coincidencias claras, las dispersas sólo meten ruido.
         if out.iter().filter(|i| !i.weak).count() >= 6 {
             out.retain(|i| !i.weak);

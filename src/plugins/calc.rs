@@ -1,7 +1,7 @@
 //! Calculadora y conversor de unidades (fend): "2^10", "sqrt(2)*pi",
 //! "5 km to mi", "0xff to decimal", "30% of 250"… Enter copia el resultado.
 
-use super::{Action, Icon, Item, Mode, Plugin, Query, glyph};
+use super::{Action, Glyph, Icon, Item, Mode, Plugin, Query};
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
@@ -26,9 +26,7 @@ impl Calc {
 fn looks_like_math(s: &str) -> bool {
     let has_digit = s.bytes().any(|b| b.is_ascii_digit());
     let lower = s.to_ascii_lowercase();
-    let has_fn = ["sqrt", "pi", "sin", "cos", "tan", "log", "ln", "abs", "exp"]
-        .iter()
-        .any(|f| lower.contains(f));
+    let has_fn = ["sqrt", "pi", "sin", "cos", "tan", "log", "ln", "abs", "exp"].iter().any(|f| lower.contains(f));
     has_digit || has_fn
 }
 
@@ -79,7 +77,7 @@ impl Plugin for Calc {
         let mut it = Item::new(
             result.clone(),
             format!("{} · Enter para copiar", q.text.trim()),
-            Icon::Glyph(glyph::CALC),
+            Icon::Glyph(Glyph::Calc),
             Action::Copy(result),
             10_000,
         );

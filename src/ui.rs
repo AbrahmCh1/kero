@@ -1,10 +1,10 @@
 use crate::config::{self, Config};
 use crate::icons::Icons;
 use crate::index::{IndexCmd, IndexStatus};
-use crate::plugins::{Action, Icon, Item, KeroCmd, SystemCmd, glyph};
+use crate::platform;
+use crate::plugins::{Action, Glyph, Icon, Item, KeroCmd};
 use crate::search::{Request, Response};
 use crate::usage::Usage;
-use crate::win::{self, Hwnd};
 use crossbeam_channel::{Receiver, Sender};
 use egui::{
     self, Align2, Color32, CornerRadius, Event, FontFamily, FontId, Id, Key, Pos2, Rect, Sense, Shadow, Stroke,
@@ -16,18 +16,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 // Medidas en puntos lógicos.
-pub const WIN_W: f32 = 760.0;
+/// En Windows la ventana es "layered" (alfa real): panel con sombra y esquinas
+/// dentro de una ventana fija. En macOS y Linux es un panel opaco y la ventana
+/// se ajusta a su altura.
+pub const LAYERED: bool = cfg!(windows);
+pub const PANEL_W: f32 = 712.0;
+const MARGIN: f32 = if LAYERED { 24.0 } else { 0.0 };
+const TOP: f32 = if LAYERED { 8.0 } else { 0.0 };
+pub const WIN_W: f32 = PANEL_W + 2.0 * MARGIN;
 pub const WIN_H: f32 = 600.0;
-const MARGIN: f32 = 24.0;
-const INPUT_H: f32 = 60.0;
+pub const INPUT_H: f32 = 60.0;
 const ROW_H: f32 = 50.0;
 const MAX_ROWS: usize = 8;
 const FOOTER_H: f32 = 34.0;
-const RADIUS: u8 = 14;
+const RADIUS: u8 = if LAYERED { 14 } else { 0 };
+const DEFAULT_ACCENT: [u8; 3] = [0, 120, 212];
 /// Tras este tiempo oculto se devuelve la memoria no usada al sistema.
 const TRIM_AFTER: Duration = Duration::from_secs(10);
 
+/// Órdenes del menú de la bandeja (no hay bandeja en Linux).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub enum TrayCmd {
     Show,
     Reindex,
@@ -97,7 +106,6 @@ pub struct Shared {
 
 pub struct KeroApp {
     s: Shared,
-    hwnd: Option<Hwnd>,
     icons: Icons,
     theme: Theme,
     query: String,
@@ -117,42 +125,45 @@ pub struct KeroApp {
     cfg_mtime: Option<SystemTime>,
     last_pointer: Option<Pos2>,
     pub hotkey: crate::hotkey::Hotkey,
-    pub _tray: Option<tray_icon::TrayIcon>,
+    /// Icono de bandeja (sólo debe seguir vivo).
+    pub _tray: Option<Box<dyn std::any::Any>>,
     /// `--query "texto"`: abre con una búsqueda precargada (pruebas y capturas).
     pub initial_query: Option<String>,
     /// `--pin`: no se oculta al perder el foco (pruebas).
     pub pinned: bool,
     needs_show: bool,
+    needs_hide: bool,
     had_focus: bool,
 }
 
 pub fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    let dir = std::path::Path::new(&std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into())).join("Fonts");
-    let mut load = |name: &str, file: &str| -> bool {
-        match std::fs::read(dir.join(file)) {
-            Ok(bytes) => {
+    let [regular, semi, icons] = platform::font_candidates();
+    // Carga la primera fuente existente de cada lista.
+    let mut load = |name: &str, paths: &[std::path::PathBuf]| -> bool {
+        match paths.iter().find_map(|p| std::fs::read(p).ok()) {
+            Some(bytes) => {
                 fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
                 true
             }
-            Err(_) => false,
+            None => false,
         }
     };
-    let has_ui = load("segoe", "segoeui.ttf");
-    let has_sb = load("segoe-sb", "seguisb.ttf");
-    let has_icons = load("icons", "SegoeIcons.ttf") || load("icons", "segmdl2.ttf");
+    let has_ui = load("system", &regular);
+    let has_sb = load("system-sb", &semi);
+    let has_icons = load("icons", &icons);
 
     let defaults = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let mut prop = Vec::new();
     if has_ui {
-        prop.push("segoe".to_string());
+        prop.push("system".to_string());
     }
     prop.extend(defaults.iter().cloned());
     fonts.families.insert(FontFamily::Proportional, prop.clone());
 
     let mut sb = Vec::new();
     if has_sb {
-        sb.push("segoe-sb".to_string());
+        sb.push("system-sb".to_string());
     }
     sb.extend(prop.iter().cloned());
     fonts.families.insert(FontFamily::Name("semibold".into()), sb);
@@ -178,7 +189,7 @@ fn wants_light(cfg: &Config) -> bool {
     match cfg.theme.as_str() {
         "light" => true,
         "dark" => false,
-        _ => win::system_uses_light_theme(),
+        _ => platform::system_uses_light_theme(),
     }
 }
 
@@ -186,24 +197,22 @@ impl KeroApp {
     pub fn new(
         ctx: &egui::Context,
         s: Shared,
-        hwnd: Option<Hwnd>,
+        scale: f32,
         hotkey: crate::hotkey::Hotkey,
-        tray: Option<tray_icon::TrayIcon>,
+        tray: Option<Box<dyn std::any::Any>>,
         start_visible: bool,
     ) -> Self {
         setup_fonts(ctx);
         let light = wants_light(&s.cfg.read());
-        let theme = Theme::new(light, win::accent_color().unwrap_or([0, 120, 212]));
+        let theme = Theme::new(light, platform::accent_color().unwrap_or(DEFAULT_ACCENT));
         apply_style(ctx, &theme, light);
-        let ppp = hwnd.map(win::dpi_scale).unwrap_or(1.0);
-        let icons = Icons::new(ctx.clone(), (28.0 * ppp).round() as u32);
+        let icons = Icons::new(ctx.clone(), (28.0 * scale).round() as u32);
         if start_visible {
             s.signals.toggle.store(true, Ordering::Relaxed);
         }
         let cfg_mtime = std::fs::metadata(config::config_path()).and_then(|m| m.modified()).ok();
         let mut app = Self {
             s,
-            hwnd,
             icons,
             theme,
             query: String::new(),
@@ -227,6 +236,7 @@ impl KeroApp {
             initial_query: None,
             pinned: false,
             needs_show: false,
+            needs_hide: false,
             had_focus: false,
         };
         if let Some(err) = app.hotkey.error.clone() {
@@ -265,6 +275,7 @@ impl KeroApp {
         self.shown_at = Instant::now();
         self.focus_input = true;
         self.needs_show = true;
+        self.needs_hide = false;
         self.had_focus = false;
         if let Some(q) = self.initial_query.take() {
             self.query = q;
@@ -274,9 +285,8 @@ impl KeroApp {
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
-        if let Some(h) = self.hwnd {
-            win::hide(h);
-        }
+        self.needs_hide = true;
+        self.needs_show = false;
         self.visible = false;
         self.query.clear();
         self.items.clear();
@@ -302,7 +312,7 @@ impl KeroApp {
             }
         }
         if new_cfg.autostart != old.autostart {
-            win::set_autostart(new_cfg.autostart);
+            platform::set_autostart(new_cfg.autostart);
         }
         let index_changed = toml::to_string(&new_cfg.index).ok() != toml::to_string(&old.index).ok();
         let light = wants_light(&new_cfg);
@@ -310,7 +320,7 @@ impl KeroApp {
         if index_changed {
             let _ = self.s.indexer.send(IndexCmd::Reconfigure(new_cfg));
         }
-        self.theme = Theme::new(light, win::accent_color().unwrap_or([0, 120, 212]));
+        self.theme = Theme::new(light, platform::accent_color().unwrap_or(DEFAULT_ACCENT));
         apply_style(ctx, &self.theme, light);
     }
 
@@ -318,8 +328,9 @@ impl KeroApp {
         self.toast = Some((msg.into(), Instant::now() + Duration::from_millis(1500)));
     }
 
-    /// Ejecuta el resultado. Devuelve true si la ventana debe ocultarse.
-    fn activate(&mut self, idx: usize, ctrl: bool, shift: bool, ctx: &egui::Context) {
+    /// Ejecuta el resultado. `alt` = Ctrl (⌘ en macOS): abrir ubicación.
+    /// `shift` = como administrador (sólo Windows).
+    fn activate(&mut self, idx: usize, alt: bool, shift: bool, ctx: &egui::Context) {
         let Some(item) = self.items.get(idx).cloned() else { return };
         if item.action.needs_confirm() && self.confirm != Some(idx) {
             self.confirm = Some(idx);
@@ -329,38 +340,28 @@ impl KeroApp {
         match &item.action {
             Action::None => hide = false,
             Action::Open(p) => {
-                if ctrl {
-                    win::reveal_in_explorer(p);
+                if alt {
+                    platform::reveal(p);
                 } else {
-                    win::open(&p.to_string_lossy());
+                    platform::open(&p.to_string_lossy());
                 }
             }
-            Action::App { id, path } => match (ctrl, shift, path) {
-                (true, _, Some(p)) => win::reveal_in_explorer(std::path::Path::new(p)),
-                (_, true, Some(p)) => {
-                    win::shell_execute(Some("runas"), p, "", None);
-                }
-                _ => {
-                    win::open(&format!("shell:AppsFolder\\{id}"));
-                }
+            Action::App { id, path } => match (alt, path) {
+                (true, Some(p)) => platform::reveal(std::path::Path::new(p)),
+                _ => platform::launch_app(id, path.as_deref(), shift),
             },
             Action::Url(u) => {
-                win::open(u);
+                platform::open(u);
             }
             Action::Copy(text) => {
-                win::copy_to_clipboard(text);
+                platform::copy_to_clipboard(text);
                 self.toast("Copiado al portapapeles");
                 self.hide_at = Some(Instant::now() + Duration::from_millis(450));
                 hide = false;
             }
-            Action::Shell(cmd) => {
-                let home = std::env::var("USERPROFILE").ok().map(std::path::PathBuf::from);
-                win::shell_execute(shift.then_some("runas"), "cmd.exe", &format!("/k {cmd}"), home.as_deref());
-            }
-            Action::Run(exe, args) => {
-                win::shell_execute(shift.then_some("runas"), exe, args, None);
-            }
-            Action::System(c) => run_system(*c),
+            Action::Shell(cmd) => platform::run_in_terminal(cmd, shift),
+            Action::Run(exe, args) => platform::run(exe, args, shift),
+            Action::System(c) => platform::run_system(*c),
             Action::Kero(c) => hide = self.run_kero(*c, ctx),
         }
         if let Some(key) = &item.key {
@@ -379,14 +380,14 @@ impl KeroApp {
                 false
             }
             KeroCmd::OpenConfig => {
-                win::open(&config::config_path().to_string_lossy());
+                platform::open(&config::config_path().to_string_lossy());
                 true
             }
             KeroCmd::AddFolder => {
                 let cfg = self.s.cfg.clone();
                 let indexer = self.s.indexer.clone();
                 std::thread::spawn(move || {
-                    if let Some(p) = win::pick_folder() {
+                    if let Some(p) = platform::pick_folder() {
                         let s = p.to_string_lossy().into_owned();
                         let mut c = cfg.write();
                         if !c.index.roots.iter().any(|r| config::expand_path(r) == p) {
@@ -406,8 +407,8 @@ impl KeroApp {
                     c.autostart
                 };
                 self.cfg_mtime = std::fs::metadata(config::config_path()).and_then(|m| m.modified()).ok();
-                win::set_autostart(on);
-                self.toast(if on { "Kero iniciará con Windows" } else { "Inicio automático desactivado" });
+                platform::set_autostart(on);
+                self.toast(if on { "Kero iniciará con el sistema" } else { "Inicio automático desactivado" });
                 let _ = ctx;
                 false
             }
@@ -431,10 +432,17 @@ impl KeroApp {
                     let k = *key;
                     let handled = matches!(
                         k,
-                        Key::ArrowUp | Key::ArrowDown | Key::Enter | Key::Escape | Key::Tab | Key::PageUp | Key::PageDown
+                        Key::ArrowUp
+                            | Key::ArrowDown
+                            | Key::Enter
+                            | Key::Escape
+                            | Key::Tab
+                            | Key::PageUp
+                            | Key::PageDown
                     );
                     if handled {
-                        actions.push((k, modifiers.ctrl, modifiers.shift));
+                        // `command` = ⌘ en macOS, Ctrl en el resto.
+                        actions.push((k, modifiers.command, modifiers.shift));
                     }
                     !handled
                 }
@@ -476,7 +484,7 @@ impl KeroApp {
                 }
                 Key::C => {
                     if let Some(t) = self.items.get(self.selected).and_then(|i| i.action.copy_text()) {
-                        win::copy_to_clipboard(&t);
+                        platform::copy_to_clipboard(&t);
                         self.toast("Copiado al portapapeles");
                     }
                 }
@@ -513,7 +521,7 @@ impl KeroApp {
                     let _ = self.s.indexer.send(IndexCmd::RebuildAll);
                 }
                 TrayCmd::Settings => {
-                    win::open(&config::config_path().to_string_lossy());
+                    platform::open(&config::config_path().to_string_lossy());
                 }
                 TrayCmd::Quit => {
                     self.s.usage.read().save();
@@ -525,20 +533,28 @@ impl KeroApp {
 
     // ------------------------------------------------------------------ pintura
 
+    /// Alto del panel según el número de resultados (puntos lógicos).
+    pub fn panel_height(&self) -> f32 {
+        let rows = self.items.len().min(MAX_ROWS);
+        INPUT_H + if rows > 0 { 1.0 + 8.0 + rows as f32 * ROW_H + 6.0 + FOOTER_H } else { 0.0 }
+    }
+
     fn paint(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let t = &{ self.theme };
         let full = ui.max_rect();
         let panel_w = full.width() - 2.0 * MARGIN;
         let rows = self.items.len().min(MAX_ROWS);
         let has_results = rows > 0;
-        let h = INPUT_H + if has_results { 1.0 + 8.0 + rows as f32 * ROW_H + 6.0 + FOOTER_H } else { 0.0 };
-        let target_h = h;
-        let h = ctx.animate_value_with_time(Id::unique("panel-h"), target_h, 0.09);
-        let panel = Rect::from_min_size(pos2(full.left() + MARGIN, full.top() + 8.0), vec2(panel_w, h));
+        let target_h = self.panel_height();
+        // Con ventana opaca el alto lo marca la propia ventana: no se anima.
+        let h = if LAYERED { ctx.animate_value_with_time(Id::unique("panel-h"), target_h, 0.09) } else { target_h };
+        let panel = Rect::from_min_size(pos2(full.left() + MARGIN, full.top() + TOP), vec2(panel_w, h));
 
         let painter = ui.painter().clone();
-        let shadow = Shadow { offset: [0, 10], blur: 32, spread: 0, color: t.shadow };
-        painter.add(shadow.as_shape(panel, CornerRadius::same(RADIUS)));
+        if LAYERED {
+            let shadow = Shadow { offset: [0, 10], blur: 32, spread: 0, color: t.shadow };
+            painter.add(shadow.as_shape(panel, CornerRadius::same(RADIUS)));
+        }
         painter.rect_filled(panel, CornerRadius::same(RADIUS), t.bg);
         painter.rect_stroke(panel, CornerRadius::same(RADIUS), Stroke::new(1.0, t.border), StrokeKind::Inside);
 
@@ -554,7 +570,7 @@ impl KeroApp {
         painter.text(
             pos2(input_rect.left() + 26.0, input_rect.center().y + 1.0),
             Align2::CENTER_CENTER,
-            glyph::SEARCH,
+            Glyph::Search.symbol(),
             icon_font(18.0),
             t.muted,
         );
@@ -708,17 +724,25 @@ impl KeroApp {
                 p.rect_filled(sw, CornerRadius::same(6), Color32::from_rgb(*r, *g, *b));
                 p.rect_stroke(sw, CornerRadius::same(6), Stroke::new(1.0, t.border), StrokeKind::Inside);
             }
-            Icon::Glyph(c) => {
-                p.text(ic.center(), Align2::CENTER_CENTER, *c, icon_font(18.0), if selected { t.text } else { t.muted });
+            Icon::Glyph(g) => {
+                let color = if selected { t.text } else { t.muted };
+                p.text(ic.center(), Align2::CENTER_CENTER, g.symbol(), icon_font(18.0), color);
             }
             Icon::None => {}
             other => match self.icons.get(other) {
                 Some(tex) => {
                     p.image(tex.id(), ic, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 }
+                // Sin icono del sistema: inicial de la app en un cuadro discreto.
+                None if matches!(other, Icon::App(_)) => {
+                    let sq = ic.shrink(2.0);
+                    p.rect_filled(sq, CornerRadius::same(7), t.sel);
+                    let initial: String = item.title.chars().take(1).flat_map(char::to_uppercase).collect();
+                    p.text(sq.center(), Align2::CENTER_CENTER, initial, semibold(14.0), t.muted);
+                }
                 None => {
-                    let g = if matches!(other, Icon::Path(_, true)) { glyph::FOLDER } else { '\u{E7C3}' };
-                    p.text(ic.center(), Align2::CENTER_CENTER, g, icon_font(18.0), t.muted);
+                    let g = if matches!(other, Icon::Path(_, true)) { Glyph::Folder } else { Glyph::File };
+                    p.text(ic.center(), Align2::CENTER_CENTER, g.symbol(), icon_font(18.0), t.muted);
                 }
             },
         }
@@ -745,9 +769,9 @@ impl KeroApp {
         p.galley(pos2(text_left, y0), title, t.text);
         p.galley(pos2(text_left, y0 + total - sub.size().y), sub, sub_color);
 
-        if selected {
-            let label = item.action.hints().first().map(|h| h.1).unwrap_or("");
-            if !label.is_empty() {
+        if selected && !matches!(item.action, Action::None) {
+            let label = item.action.primary_label();
+            {
                 let x = row.right() - 12.0;
                 self.paint_hint(p, x, row.center().y, "Enter", label);
             }
@@ -799,30 +823,12 @@ fn fmt_thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push('.');
         }
         out.push(c);
     }
     out
-}
-
-fn run_system(c: SystemCmd) {
-    match c {
-        SystemCmd::Lock => win::lock_workstation(),
-        SystemCmd::Sleep => win::suspend(false),
-        SystemCmd::Hibernate => win::suspend(true),
-        SystemCmd::Shutdown => {
-            win::shell_execute(None, "shutdown.exe", "/s /t 0", None);
-        }
-        SystemCmd::Restart => {
-            win::shell_execute(None, "shutdown.exe", "/r /t 0", None);
-        }
-        SystemCmd::SignOut => {
-            win::shell_execute(None, "shutdown.exe", "/l", None);
-        }
-        SystemCmd::EmptyRecycleBin => win::empty_recycle_bin(),
-    }
 }
 
 fn apply_style(ctx: &egui::Context, t: &Theme, light: bool) {
@@ -850,6 +856,11 @@ impl KeroApp {
         std::mem::take(&mut self.needs_show)
     }
 
+    /// El host debe ocultar la ventana.
+    pub fn take_needs_hide(&mut self) -> bool {
+        std::mem::take(&mut self.needs_hide)
+    }
+
     pub fn request_hide(&mut self) {
         self.hide_at = Some(Instant::now());
     }
@@ -862,10 +873,10 @@ impl KeroApp {
         if let Some(t) = self.hide_at {
             at(t);
         }
-        if let Some((_, until)) = &self.toast {
-            if *until > now {
-                at(*until);
-            }
+        if let Some((_, until)) = &self.toast
+            && *until > now
+        {
+            at(*until);
         }
         if !self.visible && !self.trimmed {
             at(self.hidden_at + TRIM_AFTER);
@@ -875,8 +886,7 @@ impl KeroApp {
 
     pub fn logic(&mut self, ctx: &egui::Context, focused: bool) {
         if self.s.signals.toggle.swap(false, Ordering::Relaxed) {
-            let fg = self.hwnd.is_some_and(win::is_foreground);
-            if self.visible && fg {
+            if self.visible && focused {
                 self.hide(ctx);
             } else {
                 self.show(ctx);
@@ -898,7 +908,7 @@ impl KeroApp {
                 self.hide(ctx);
             }
         } else if !self.trimmed && self.hidden_at.elapsed() >= TRIM_AFTER {
-            win::trim_working_set();
+            platform::trim_working_set();
             self.trimmed = true;
         }
     }

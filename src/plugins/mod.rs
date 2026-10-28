@@ -16,35 +16,97 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
 use std::path::PathBuf;
 
-/// Glifos de "Segoe Fluent Icons" / "Segoe MDL2 Assets".
-pub mod glyph {
-    pub const SEARCH: char = '\u{E721}';
-    pub const CALC: char = '\u{E8EF}';
-    pub const GLOBE: char = '\u{E774}';
-    pub const LINK: char = '\u{E71B}';
-    pub const LOCK: char = '\u{E72E}';
-    pub const POWER: char = '\u{E7E8}';
-    pub const RESTART: char = '\u{E777}';
-    pub const SLEEP: char = '\u{E708}';
-    pub const SIGNOUT: char = '\u{F3B1}';
-    pub const TRASH: char = '\u{E74D}';
-    pub const SETTINGS: char = '\u{E713}';
-    pub const TERMINAL: char = '\u{E756}';
-    pub const FOLDER: char = '\u{E8B7}';
-    pub const REFRESH: char = '\u{E72C}';
-    pub const ADD: char = '\u{E710}';
-    pub const EXIT: char = '\u{E7E8}';
-    pub const INFO: char = '\u{E946}';
-    pub const STARTUP: char = '\u{E7B5}';
-    pub const TASKS: char = '\u{E9D9}';
+/// Iconos de la interfaz. En Windows usan "Segoe Fluent Icons"/"Segoe MDL2 Assets";
+/// en macOS y Linux, los emoji monocromos que incluye egui.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyph {
+    Search,
+    Calc,
+    Globe,
+    Link,
+    Lock,
+    Power,
+    Restart,
+    Sleep,
+    SignOut,
+    Trash,
+    Settings,
+    Terminal,
+    Folder,
+    File,
+    Refresh,
+    Add,
+    Exit,
+    Info,
+    Startup,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Tasks,
 }
+
+impl Glyph {
+    #[cfg(windows)]
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Glyph::Search => "\u{E721}",
+            Glyph::Calc => "\u{E8EF}",
+            Glyph::Globe => "\u{E774}",
+            Glyph::Link => "\u{E71B}",
+            Glyph::Lock => "\u{E72E}",
+            Glyph::Power | Glyph::Exit => "\u{E7E8}",
+            Glyph::Restart => "\u{E777}",
+            Glyph::Sleep => "\u{E708}",
+            Glyph::SignOut => "\u{F3B1}",
+            Glyph::Trash => "\u{E74D}",
+            Glyph::Settings => "\u{E713}",
+            Glyph::Terminal => "\u{E756}",
+            Glyph::Folder => "\u{E8B7}",
+            Glyph::File => "\u{E7C3}",
+            Glyph::Refresh => "\u{E72C}",
+            Glyph::Add => "\u{E710}",
+            Glyph::Info => "\u{E946}",
+            Glyph::Startup => "\u{E7B5}",
+            Glyph::Tasks => "\u{E9D9}",
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Glyph::Search => "🔍",
+            Glyph::Calc => "🖩",
+            Glyph::Globe => "🌐",
+            Glyph::Link => "🔗",
+            Glyph::Lock => "🔒",
+            Glyph::Power => "⏹",
+            Glyph::Exit => "✖",
+            Glyph::Restart | Glyph::Refresh => "🔄",
+            Glyph::Sleep => "🌙",
+            Glyph::SignOut => "🚪",
+            Glyph::Trash => "🗑",
+            Glyph::Settings => "⚙",
+            Glyph::Terminal => "💻",
+            Glyph::Folder => "📁",
+            Glyph::File => "📄",
+            Glyph::Add => "➕",
+            Glyph::Info => "ℹ",
+            Glyph::Startup => "🚀",
+            Glyph::Tasks => "📊",
+        }
+    }
+}
+
+/// Tecla modificadora principal: ⌘ en macOS, Ctrl en el resto.
+pub const MOD_ENTER: &str = if cfg!(target_os = "macos") { "⌘ Enter" } else { "Ctrl Enter" };
+pub const MOD_C: &str = if cfg!(target_os = "macos") { "⌘ C" } else { "Ctrl C" };
+/// Elevar con Shift+Enter sólo existe en Windows (UAC).
+const ADMIN: bool = cfg!(windows);
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum Icon {
     None,
-    Glyph(char),
-    /// Icono de app en `shell:AppsFolder`.
+    Glyph(Glyph),
+    /// Icono de app (en Windows, de `shell:AppsFolder`).
     App(String),
     /// Icono de archivo/carpeta del Shell.
     Path(PathBuf, bool),
@@ -55,11 +117,13 @@ pub enum Icon {
 pub enum SystemCmd {
     Lock,
     Sleep,
+    /// macOS no distingue hibernar de suspender.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Hibernate,
     Shutdown,
     Restart,
     SignOut,
-    EmptyRecycleBin,
+    EmptyTrash,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,11 +139,16 @@ pub enum KeroCmd {
 pub enum Action {
     None,
     Open(PathBuf),
-    App { id: String, path: Option<String> },
+    App {
+        id: String,
+        path: Option<String>,
+    },
     /// URL o URI (https:, ms-settings:, …)
     Url(String),
     Copy(String),
     Shell(String),
+    /// Programa + argumentos (en macOS todo se abre por URL o como app).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Run(String, String),
     System(SystemCmd),
     Kero(KeroCmd),
@@ -87,10 +156,7 @@ pub enum Action {
 
 impl Action {
     pub fn needs_confirm(&self) -> bool {
-        matches!(
-            self,
-            Action::System(SystemCmd::Shutdown | SystemCmd::Restart | SystemCmd::SignOut)
-        )
+        matches!(self, Action::System(SystemCmd::Shutdown | SystemCmd::Restart | SystemCmd::SignOut))
     }
 
     /// Ruta asociada (para "abrir ubicación" y "copiar ruta").
@@ -110,17 +176,28 @@ impl Action {
         }
     }
 
-    pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
+    pub fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        let mut h = vec![("Enter", self.primary_label())];
         match self {
-            Action::Open(_) => &[("Enter", "Abrir"), ("Ctrl Enter", "Carpeta"), ("Ctrl C", "Copiar ruta")],
+            Action::Open(_) => h.extend([(MOD_ENTER, "Carpeta"), (MOD_C, "Copiar ruta")]),
             Action::App { path: Some(_), .. } => {
-                &[("Enter", "Abrir"), ("Shift Enter", "Admin"), ("Ctrl Enter", "Ubicación")]
+                if ADMIN {
+                    h.push(("Shift Enter", "Admin"));
+                }
+                h.push((MOD_ENTER, "Ubicación"));
             }
-            Action::App { .. } => &[("Enter", "Abrir")],
-            Action::Copy(_) => &[("Enter", "Copiar")],
-            Action::Url(_) => &[("Enter", "Abrir"), ("Ctrl C", "Copiar")],
-            Action::Shell(_) => &[("Enter", "Ejecutar"), ("Shift Enter", "Admin")],
-            _ => &[("Enter", "Ejecutar")],
+            Action::Url(_) => h.push((MOD_C, "Copiar")),
+            Action::Shell(_) if ADMIN => h.push(("Shift Enter", "Admin")),
+            _ => {}
+        }
+        h
+    }
+
+    pub fn primary_label(&self) -> &'static str {
+        match self {
+            Action::Open(_) | Action::App { .. } | Action::Url(_) => "Abrir",
+            Action::Copy(_) => "Copiar",
+            _ => "Ejecutar",
         }
     }
 }

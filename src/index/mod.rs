@@ -105,9 +105,7 @@ impl<F: Fn()> Indexer<F> {
         let cached_apps = apps::load(&apps_cache());
         let cached: Vec<Arc<RootIndex>> = roots
             .iter()
-            .filter_map(|r| {
-                files::load(&cache_file(r)).map(|files| Arc::new(RootIndex { root: r.clone(), files }))
-            })
+            .filter_map(|r| files::load(&cache_file(r)).map(|files| Arc::new(RootIndex { root: r.clone(), files })))
             .collect();
         self.publish(|idx| {
             idx.apps = cached_apps;
@@ -198,17 +196,15 @@ impl<F: Fn()> Indexer<F> {
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(ev) = res else { return };
             // Sólo nos importan altas, bajas y renombres (no cambios de contenido).
-            let relevant = matches!(
-                ev.kind,
-                EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
-            );
+            let relevant =
+                matches!(ev.kind, EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)));
             if !relevant {
                 return;
             }
             for p in &ev.paths {
                 let excluded = p.components().any(|c| {
                     let s = c.as_os_str().to_string_lossy().to_lowercase();
-                    exclude.iter().any(|e| *e == s)
+                    exclude.contains(&s)
                 });
                 if excluded {
                     continue;

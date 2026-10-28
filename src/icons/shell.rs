@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, GetObjectW,
-    HBITMAP, HGDIOBJ, ReleaseDC,
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, GetObjectW, HBITMAP,
+    HGDIOBJ, ReleaseDC,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::UI::Shell::{
@@ -74,7 +74,7 @@ impl Icons {
                         None => Slot::Failed,
                     };
                     m.lock().insert(key, slot);
-                    ctx.request_repaint();
+                    crate::host::wake();
                 }
             })
             .expect("icon thread");
@@ -137,8 +137,8 @@ unsafe fn bitmap_to_image(hbm: HBITMAP) -> Option<ColorImage> {
         if lines == 0 {
             return None;
         }
-        let has_alpha = buf.chunks_exact(4).any(|p| p[3] != 0);
-        for px in buf.chunks_exact_mut(4) {
+        let has_alpha = buf.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
+        for px in buf.as_chunks_mut::<4>().0 {
             px.swap(0, 2); // BGRA → RGBA
             if !has_alpha {
                 px[3] = 255;

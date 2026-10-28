@@ -88,10 +88,10 @@ impl Usage {
                 _ => 0,
             };
         }
-        if let Some((k, c)) = self.queries.get(query_lower.trim()) {
-            if k == key {
-                b += 120 + (*c).min(10) as i32 * 5;
-            }
+        if let Some((k, c)) = self.queries.get(query_lower.trim())
+            && k == key
+        {
+            b += 120 + (*c).min(10) as i32 * 5;
         }
         b
     }

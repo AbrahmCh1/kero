@@ -3,7 +3,10 @@ name = "kero"
 version = "0.1.0"
 edition = "2024"
 authors = ["ACY Solutions"]
-description = "Lanzador estilo Spotlight para Windows"
+description = "Lanzador estilo Spotlight, ligero y rápido, para Windows, macOS y Linux"
+license = "MIT"
+repository = "https://github.com/AbrahmCh1/kero"
+readme = "README.md"
 
 [dependencies]
 crossbeam-channel = "0.5.17"
@@ -18,9 +21,40 @@ raw-window-handle = "0.6"
 rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
-tray-icon = "0.26.1"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_System_Threading", "Win32_System_Registry", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_ProcessStatus", "Win32_System_Shutdown", "Win32_UI_HiDpi", "Win32_Storage_FileSystem", "Win32_UI_Shell_PropertiesSystem", "Win32_System_Power", "Win32_Security", "Win32_System_SystemServices", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole"] }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Power",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Shutdown",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+arboard = { version = "3.7", default-features = false }
+softbuffer = "0.4.8"
+# Sin Segoe Fluent Icons: los iconos de la interfaz son emoji monocromos.
+egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.26.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "x11", "wayland"] }
 
 [profile.release]
 opt-level = 3

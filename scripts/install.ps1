@@ -5,23 +5,27 @@
 # La instalación vive aquí y no dentro de kero.exe a propósito: un exe sin firmar
 # que se copia a sí mismo y se registra dispara la heurística de Defender.
 $ErrorActionPreference = "Stop"
-$root = Resolve-Path "$PSScriptRoot\.."
 
-Push-Location $root
-try {
-    cargo build --release
-    if ($LASTEXITCODE -ne 0) { throw "cargo build falló" }
-} finally {
-    Pop-Location
-}
-
-$exe = Join-Path $root "target\release\kero.exe"
-$hasCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
-    Where-Object { $_.Subject -eq "CN=ACY Solutions" -and $_.NotAfter -gt (Get-Date) }
-if ($hasCert) {
-    & "$PSScriptRoot\sign.ps1" -File $exe
-} else {
-    Write-Warning "Sin certificado: se instala sin firmar (ejecuta scripts\setup-cert.ps1 para firmar)."
+# Zip del release: kero.exe viene junto a este script (ya compilado y, si
+# aplica, firmado en CI). Desde el repositorio: se compila y se firma aquí.
+$exe = Join-Path $PSScriptRoot "kero.exe"
+if (-not (Test-Path $exe)) {
+    $root = Resolve-Path "$PSScriptRoot\.."
+    Push-Location $root
+    try {
+        cargo build --release
+        if ($LASTEXITCODE -ne 0) { throw "cargo build falló" }
+    } finally {
+        Pop-Location
+    }
+    $exe = Join-Path $root "target\release\kero.exe"
+    $hasCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
+        Where-Object { $_.Subject -eq "CN=ACY Solutions" -and $_.NotAfter -gt (Get-Date) }
+    if ($hasCert) {
+        & "$PSScriptRoot\sign.ps1" -File $exe
+    } else {
+        Write-Warning "Sin certificado: se instala sin firmar (ejecuta scripts\setup-cert.ps1 para firmar)."
+    }
 }
 
 # Cierra la instancia abierta (de forma ordenada) para poder reemplazar el exe.

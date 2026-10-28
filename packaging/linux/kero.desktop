@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kero
+GenericName=Lanzador
+Comment=Lanzador estilo Spotlight, ligero y rápido
+Exec=kero
+Icon=kero
+Terminal=false
+Categories=Utility;
+Keywords=launcher;search;spotlight;lanzador;buscar;
+StartupNotify=false

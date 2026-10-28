@@ -5,8 +5,8 @@
 //! Trabaja en espacio gamma con alfa premultiplicado, igual que egui_glow,
 //! y escribe BGRA premultiplicado listo para `UpdateLayeredWindow`.
 
-use egui::epaint::{ClippedPrimitive, ImageData, Primitive, TextureId, Vertex, textures::TexturesDelta};
 use egui::Color32;
+use egui::epaint::{ClippedPrimitive, ImageData, Primitive, TextureId, Vertex, textures::TexturesDelta};
 use std::collections::HashMap;
 
 struct Texture {
@@ -76,12 +76,8 @@ impl Raster {
                 continue;
             }
             let tex = self.textures.get(&mesh.texture_id);
-            for t in mesh.indices.chunks_exact(3) {
-                let v = [
-                    &mesh.vertices[t[0] as usize],
-                    &mesh.vertices[t[1] as usize],
-                    &mesh.vertices[t[2] as usize],
-                ];
+            for t in mesh.indices.as_chunks::<3>().0 {
+                let v = [&mesh.vertices[t[0] as usize], &mesh.vertices[t[1] as usize], &mesh.vertices[t[2] as usize]];
                 triangle(buf, w, clip, v, tex, ppp);
             }
         }

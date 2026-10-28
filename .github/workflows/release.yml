@@ -1,0 +1,263 @@
+# Publica un release al subir un tag vX.Y.Z (debe coincidir con Cargo.toml).
+#
+# Firma opcional, según los secretos que existan en el repositorio:
+#   Windows: WINDOWS_CERTIFICATE (PFX en base64) + WINDOWS_CERTIFICATE_PASSWORD
+#   macOS:   APPLE_CERTIFICATE (P12 "Developer ID Application" en base64),
+#            APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY
+#            y, para notarizar, APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+# Sin secretos se publica sin firmar (macOS con firma ad-hoc). Siempre se
+# publican SHA256SUMS.txt y una atestación de procedencia de GitHub.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag existente a publicar (p. ej. v0.2.0)"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - id: v
+        name: Comprobar que el tag coincide con Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::El tag $TAG no coincide con la versión de Cargo.toml ($version)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Rust estable
+        run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Compilar
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Firmar
+        if: env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d Kero `
+            "target\${{ matrix.target }}\release\kero.exe"
+          $code = $LASTEXITCODE
+          Remove-Item $pfx
+          if ($code -ne 0) { exit $code }
+
+      - name: Empaquetar
+        shell: pwsh
+        run: |
+          $name = "kero-$env:VERSION-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\kero.exe", scripts\install.ps1, scripts\uninstall.ps1, README.md, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-${{ matrix.arch }}
+          path: "*.zip"
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Rust estable
+        run: rustup toolchain install stable --profile minimal --target aarch64-apple-darwin --target x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar (universal)
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create -output kero \
+            target/aarch64-apple-darwin/release/kero \
+            target/x86_64-apple-darwin/release/kero
+
+      - name: Crear Kero.app
+        run: |
+          app=Kero.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp kero "$app/Contents/MacOS/kero"
+          sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          mkdir kero.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s assets/kero-1024.png --out "kero.iconset/icon_${s}x${s}.png" >/dev/null
+            d=$((s * 2))
+            sips -z $d $d assets/kero-1024.png --out "kero.iconset/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns kero.iconset -o "$app/Contents/Resources/kero.icns"
+
+      - name: Firmar
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            keychain="$RUNNER_TEMP/build.keychain"
+            pass=$(uuidgen)
+            echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security create-keychain -p "$pass" "$keychain"
+            security set-keychain-settings -lut 21600 "$keychain"
+            security unlock-keychain -p "$pass" "$keychain"
+            security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain"
+            security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+            rm "$RUNNER_TEMP/cert.p12"
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" Kero.app
+          else
+            # Firma ad-hoc: obligatoria en Apple Silicon; Gatekeeper avisará igualmente.
+            codesign --force --sign - Kero.app
+          fi
+          codesign --verify --verbose Kero.app
+
+      - name: Crear DMG
+        run: |
+          dmg="kero-$VERSION-macos-universal.dmg"
+          mkdir dmg
+          cp -R Kero.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname Kero -srcfolder dmg -ov -format UDZO "$dmg"
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
+          fi
+
+      - name: Notarizar
+        if: env.APPLE_ID != '' && env.APPLE_CERTIFICATE != ''
+        run: |
+          dmg="kero-$VERSION-macos-universal.dmg"
+          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: "*.dmg"
+
+  linux:
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          # 22.04: glibc 2.35, compatible con la mayoría de distros actuales.
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Rust estable
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar
+        run: cargo build --release
+
+      - name: Empaquetar
+        run: |
+          name="kero-$VERSION-linux-${{ matrix.arch }}"
+          mkdir "$name"
+          cp target/release/kero assets/kero.png packaging/linux/kero.desktop \
+             packaging/linux/install.sh packaging/linux/uninstall.sh README.md LICENSE "$name/"
+          chmod +x "$name/kero" "$name/install.sh" "$name/uninstall.sh"
+          tar -czf "$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.arch }}
+          path: "*.tar.gz"
+
+  release:
+    needs: [version, windows, macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Sumas SHA-256
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Atestación de procedencia
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "dist/*"
+
+      - name: Publicar release
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title "Kero $VERSION" --generate-notes --verify-tag
+          fi

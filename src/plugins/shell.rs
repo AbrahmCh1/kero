@@ -1,6 +1,6 @@
 //! ">comando" ejecuta en una terminal. Shift+Enter lo lanza como administrador.
 
-use super::{Action, Icon, Item, Mode, Plugin, Query, glyph};
+use super::{Action, Glyph, Icon, Item, Mode, Plugin, Query};
 
 pub struct Shell;
 
@@ -14,12 +14,18 @@ impl Plugin for Shell {
             out.push(Item::new(
                 "Escribe un comando…",
                 "Se ejecuta en una terminal nueva",
-                Icon::Glyph(glyph::TERMINAL),
+                Icon::Glyph(Glyph::Terminal),
                 Action::None,
                 0,
             ));
             return;
         }
-        out.push(Item::new(cmd, "Ejecutar en terminal", Icon::Glyph(glyph::TERMINAL), Action::Shell(cmd.to_string()), 10_000));
+        out.push(Item::new(
+            cmd,
+            "Ejecutar en terminal",
+            Icon::Glyph(Glyph::Terminal),
+            Action::Shell(cmd.to_string()),
+            10_000,
+        ));
     }
 }

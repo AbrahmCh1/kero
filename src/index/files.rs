@@ -6,7 +6,6 @@
 
 use parking_lot::Mutex;
 use std::io::{Read, Write};
-use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 pub const FLAG_DIR: u8 = 1;
@@ -40,8 +39,8 @@ impl FileIndex {
         let dir = &self.dirs[e.dir as usize];
         let mut s = String::with_capacity(dir.len() + e.name_len as usize + 1);
         s.push_str(dir);
-        if !s.ends_with('\\') {
-            s.push('\\');
+        if !s.ends_with(std::path::MAIN_SEPARATOR) {
+            s.push(std::path::MAIN_SEPARATOR);
         }
         s.push_str(self.name(e));
         PathBuf::from(s)
@@ -74,9 +73,31 @@ struct Chunk {
     children: Vec<(String, bool)>,
 }
 
-const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+struct Kind {
+    is_dir: bool,
+    hidden: bool,
+    /// Enlace simbólico o junction: no se recorre.
+    link: bool,
+}
+
+#[cfg(windows)]
+fn classify(entry: &std::fs::DirEntry, _name: &str) -> Option<Kind> {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x2;
+    const SYSTEM: u32 = 0x4;
+    const REPARSE_POINT: u32 = 0x400;
+    // En Windows `DirEntry::metadata` sale de los datos de FindNextFile: no cuesta otra llamada.
+    let meta = entry.metadata().ok()?;
+    let attrs = meta.file_attributes();
+    Some(Kind { is_dir: meta.is_dir(), hidden: attrs & (HIDDEN | SYSTEM) != 0, link: attrs & REPARSE_POINT != 0 })
+}
+
+#[cfg(not(windows))]
+fn classify(entry: &std::fs::DirEntry, name: &str) -> Option<Kind> {
+    // `file_type` usa d_type de readdir: tampoco requiere un stat por archivo.
+    let ft = entry.file_type().ok()?;
+    Some(Kind { is_dir: ft.is_dir(), hidden: name.starts_with('.'), link: ft.is_symlink() })
+}
 
 /// Recorre las raíces en paralelo (un trabajo de rayon por carpeta).
 pub fn build(roots: &[PathBuf], opts: &WalkOptions) -> FileIndex {
@@ -130,13 +151,7 @@ fn push_entry(idx: &mut FileIndex, name: &str, dir: u32, is_dir: bool) {
     if name.is_ascii() {
         flags |= FLAG_ASCII;
     }
-    idx.entries.push(FileEntry {
-        name_off: idx.names.len() as u32,
-        dir,
-        name_len: len as u16,
-        flags,
-        _pad: 0,
-    });
+    idx.entries.push(FileEntry { name_off: idx.names.len() as u32, dir, name_len: len as u16, flags, _pad: 0 });
     idx.names.push_str(&name[..len]);
 }
 
@@ -154,25 +169,23 @@ fn visit<'s>(
     let mut subdirs = Vec::new();
     for entry in rd.flatten() {
         let Ok(name) = entry.file_name().into_string() else { continue };
-        let Ok(meta) = entry.metadata() else { continue };
-        let attrs = meta.file_attributes();
-        if opts.skip_hidden && attrs & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM) != 0 {
+        let Some(kind) = classify(&entry, &name) else { continue };
+        if opts.skip_hidden && kind.hidden {
             continue;
         }
         let lower = name.to_lowercase();
-        if exclude.iter().any(|e| *e == lower) {
+        if exclude.contains(&lower) {
             continue;
         }
-        let is_dir = meta.is_dir();
-        if !is_dir {
-            if let Some(ext) = lower.rsplit_once('.').map(|(_, e)| e) {
-                if exclude_ext.iter().any(|e| e == ext) {
-                    continue;
-                }
-            }
+        let is_dir = kind.is_dir;
+        if !is_dir
+            && let Some(ext) = lower.rsplit_once('.').map(|(_, e)| e)
+            && exclude_ext.iter().any(|e| e == ext)
+        {
+            continue;
         }
         // No seguimos junctions/symlinks de carpetas: evita ciclos y duplicados.
-        if is_dir && attrs & FILE_ATTRIBUTE_REPARSE_POINT == 0 && depth < opts.max_depth {
+        if is_dir && !kind.link && depth < opts.max_depth {
             subdirs.push(entry.path());
         }
         children.push((name, is_dir));

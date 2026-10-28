@@ -5,38 +5,47 @@ mod host;
 mod hotkey;
 mod icons;
 mod index;
+mod platform;
 mod plugins;
 mod raster;
 mod search;
 mod ui;
 mod usage;
-mod win;
 
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use parking_lot::RwLock;
+use platform::Ipc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use ui::{Signals, TrayCmd};
+use ui::Signals;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--bench") {
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    if has("--bench") {
         bench(args.get(2).map(String::as_str).unwrap_or("informe"));
         return;
     }
-    if args.iter().any(|a| a == "--quit") {
-        win::quit_running_instance();
+    if has("--version") {
+        println!("kero {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    if !win::acquire_single_instance() {
+    if has("--quit") {
+        if platform::ipc_send(Ipc::Quit) {
+            platform::wait_until_closed();
+        }
         return;
     }
-    win::listen_for_quit(|| std::process::exit(0));
-    let start_hidden = args.iter().any(|a| a == "--hidden");
+    if !platform::acquire_single_instance() {
+        // Ya hay una instancia: un segundo arranque (o `--toggle`) la muestra u oculta.
+        if !has("--hidden") {
+            platform::ipc_send(Ipc::Toggle);
+        }
+        return;
+    }
+    let start_hidden = has("--hidden");
     let initial_query = args.iter().position(|a| a == "--query").and_then(|i| args.get(i + 1)).cloned();
-    let pinned = args.iter().any(|a| a == "--pin");
+    let pinned = has("--pin");
 
     // Pocos hilos bastan: la búsqueda es corta y no queremos picos de memoria.
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
@@ -44,14 +53,14 @@ fn main() {
 
     let cfg = config::Config::load();
     if cfg.autostart {
-        win::set_autostart(true);
+        platform::set_autostart(true);
     }
     let hotkey = hotkey::Hotkey::new(&cfg.hotkey);
 
     let ctx = egui::Context::default();
     host::run(
         ctx,
-        Box::new(move |ctx, hwnd| {
+        Box::new(move |ctx, scale| {
             let signals = Arc::new(Signals::default());
 
             let shared_index: index::SharedIndex = Arc::new(RwLock::new(Arc::new(index::Index::default())));
@@ -59,28 +68,37 @@ fn main() {
             let usage = Arc::new(RwLock::new(usage::Usage::load(config::data_dir().join("usage.tsv"))));
             let cfg = Arc::new(RwLock::new(cfg));
 
-            let c = ctx.clone();
-            let indexer = index::spawn(cfg.read().clone(), shared_index.clone(), status.clone(), move || {
-                c.request_repaint()
-            });
+            let indexer = index::spawn(cfg.read().clone(), shared_index.clone(), status.clone(), crate::host::wake);
             let engine = search::Engine::new(shared_index.clone(), usage.clone(), cfg.clone());
-            let c = ctx.clone();
-            let (req_tx, res_rx) = engine.spawn(move || c.request_repaint());
+            let (req_tx, res_rx) = engine.spawn(crate::host::wake);
 
             {
                 let signals = signals.clone();
-                let c = ctx.clone();
                 GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
                     if e.state == HotKeyState::Pressed {
                         signals.toggle.store(true, Ordering::Relaxed);
-                        c.request_repaint();
+                        crate::host::wake();
                     }
                 }));
             }
+            {
+                let signals = signals.clone();
+                let usage = usage.clone();
+                platform::ipc_listen(move |msg| match msg {
+                    Ipc::Quit => {
+                        usage.read().save();
+                        std::process::exit(0);
+                    }
+                    Ipc::Toggle => {
+                        signals.toggle.store(true, Ordering::Relaxed);
+                        crate::host::wake();
+                    }
+                });
+            }
 
-            let tray = build_tray(ctx, &signals);
+            let tray = tray::build(&signals);
             let shared = ui::Shared { status, usage, cfg, indexer, signals, req_tx, res_rx };
-            let mut app = ui::KeroApp::new(ctx, shared, Some(hwnd), hotkey, tray, !start_hidden);
+            let mut app = ui::KeroApp::new(ctx, shared, scale, hotkey, tray, !start_hidden);
             app.initial_query = initial_query;
             app.pinned = pinned;
             app
@@ -88,44 +106,87 @@ fn main() {
     );
 }
 
-fn build_tray(ctx: &egui::Context, signals: &Arc<Signals>) -> Option<tray_icon::TrayIcon> {
-    let menu = Menu::new();
-    let show = MenuItem::new("Abrir Kero", true, None);
-    let reindex = MenuItem::new("Reindexar", true, None);
-    let settings = MenuItem::new("Configuración", true, None);
-    let quit = MenuItem::new("Salir", true, None);
-    let _ = menu.append_items(&[&show, &reindex, &settings, &PredefinedMenuItem::separator(), &quit]);
-    let ids = [
-        (show.id().clone(), TrayCmd::Show),
-        (reindex.id().clone(), TrayCmd::Reindex),
-        (settings.id().clone(), TrayCmd::Settings),
-        (quit.id().clone(), TrayCmd::Quit),
-    ];
+/// Icono en la bandeja (Windows) o en la barra de menús (macOS). En Linux no
+/// hay: evitaría depender de GTK; se usa `kero --quit` o "Kero: Salir".
+#[cfg(any(windows, target_os = "macos"))]
+mod tray {
+    use crate::ui::{Signals, TrayCmd};
+    use std::sync::Arc;
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let s = signals.clone();
-    let c = ctx.clone();
-    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
-        if let Some((_, cmd)) = ids.iter().find(|(id, _)| *id == e.id) {
-            s.tray.lock().push(*cmd);
-            c.request_repaint();
-        }
-    }));
-    let s = signals.clone();
-    let c = ctx.clone();
-    TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
-        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
-            s.tray.lock().push(TrayCmd::Show);
-            c.request_repaint();
-        }
-    }));
+    pub fn build(signals: &Arc<Signals>) -> Option<Box<dyn std::any::Any>> {
+        let menu = Menu::new();
+        let show = MenuItem::new("Abrir Kero", true, None);
+        let reindex = MenuItem::new("Reindexar", true, None);
+        let settings = MenuItem::new("Configuración", true, None);
+        let quit = MenuItem::new("Salir", true, None);
+        let _ = menu.append_items(&[&show, &reindex, &settings, &PredefinedMenuItem::separator(), &quit]);
+        let ids = [
+            (show.id().clone(), TrayCmd::Show),
+            (reindex.id().clone(), TrayCmd::Reindex),
+            (settings.id().clone(), TrayCmd::Settings),
+            (quit.id().clone(), TrayCmd::Quit),
+        ];
 
-    TrayIconBuilder::new()
-        .with_tooltip("Kero")
-        .with_menu(Box::new(menu))
-        .with_menu_on_left_click(false)
-        .with_icon(tray_icon::Icon::from_resource(1, Some(win::small_icon_size())).ok()?)
-        .build()
-        .ok()
+        let s = signals.clone();
+        MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+            if let Some((_, cmd)) = ids.iter().find(|(id, _)| *id == e.id) {
+                s.tray.lock().push(*cmd);
+                crate::host::wake();
+            }
+        }));
+        let s = signals.clone();
+        TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+                s.tray.lock().push(TrayCmd::Show);
+                crate::host::wake();
+            }
+        }));
+
+        let builder = TrayIconBuilder::new().with_tooltip("Kero").with_menu(Box::new(menu));
+        #[cfg(windows)]
+        let builder = builder
+            .with_menu_on_left_click(false)
+            .with_icon(tray_icon::Icon::from_resource(1, Some(crate::platform::small_icon_size())).ok()?);
+        #[cfg(target_os = "macos")]
+        let builder = {
+            let (rgba, n) = lens_template();
+            builder.with_icon_templated(tray_icon::Icon::from_rgba(rgba, n, n).ok()?)
+        };
+        let tray = builder.build().ok()?;
+        Some(Box::new(tray))
+    }
+
+    /// Lupa monocroma para la barra de menús; macOS la tiñe según el tema.
+    #[cfg(target_os = "macos")]
+    fn lens_template() -> (Vec<u8>, u32) {
+        const N: u32 = 36;
+        let mut px = vec![0u8; (N * N * 4) as usize];
+        let s = N as f32 / 32.0;
+        let cov = |d: f32| (0.5 - d * s).clamp(0.0, 1.0);
+        for y in 0..N {
+            for x in 0..N {
+                let (fx, fy) = ((x as f32 + 0.5) / s, (y as f32 + 0.5) / s);
+                let ring = (((fx - 14.0).powi(2) + (fy - 14.0).powi(2)).sqrt() - 8.0).abs() - 2.0;
+                let (ax, ay, bx, by) = (20.0f32, 20.0f32, 27.0f32, 27.0f32);
+                let t = (((fx - ax) * (bx - ax) + (fy - ay) * (by - ay)) / ((bx - ax).powi(2) + (by - ay).powi(2)))
+                    .clamp(0.0, 1.0);
+                let handle = ((fx - (ax + t * (bx - ax))).powi(2) + (fy - (ay + t * (by - ay))).powi(2)).sqrt() - 2.3;
+                let a = cov(ring).max(cov(handle));
+                let i = ((y * N + x) * 4) as usize;
+                px[i..i + 4].copy_from_slice(&[0, 0, 0, (a * 255.0) as u8]);
+            }
+        }
+        (px, N)
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+mod tray {
+    pub fn build(_signals: &std::sync::Arc<crate::ui::Signals>) -> Option<Box<dyn std::any::Any>> {
+        None
+    }
 }
 
 /// `kero --bench <consulta>`: mide indexado y búsqueda sin UI.
