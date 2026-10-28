@@ -1,7 +1,7 @@
 //! Helpers finos sobre Win32.
 
 use std::path::{Path, PathBuf};
-use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, POINT, RECT, SIZE};
+use windows::Win32::Foundation::{CloseHandle, COLORREF, HANDLE, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CreateCompatibleDC,
     CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ,
@@ -17,11 +17,11 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RRF_RT_REG_DWORD, RegCloseKey, RegDeleteValueW,
     RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
-use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_MENU,
+use windows::Win32::System::Threading::{
+    CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, GetCurrentProcess, INFINITE, OpenEventW, OpenMutexW,
+    SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{
     FileOpenDialog, FOS_PICKFOLDERS, IFileOpenDialog, SIGDN_FILESYSPATH, ShellExecuteW,
 };
@@ -154,17 +154,9 @@ impl Drop for LayeredSurface {
 
 pub fn focus(hwnd: Hwnd) {
     unsafe {
-        let h = hwnd.h();
-        if !SetForegroundWindow(h).as_bool() || GetForegroundWindow() != h {
-            // Truco clásico: una pulsación de Alt sintética desbloquea SetForegroundWindow.
-            let key = |flags| INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, dwFlags: flags, ..Default::default() } },
-            };
-            let inputs = [key(Default::default()), key(KEYEVENTF_KEYUP)];
-            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-            let _ = SetForegroundWindow(h);
-        }
+        // Al pulsar el atajo global Windows nos concede el primer plano;
+        // no hace falta (ni conviene) simular teclas.
+        let _ = SetForegroundWindow(hwnd.h());
     }
 }
 
@@ -176,6 +168,12 @@ pub fn hide(hwnd: Hwnd) {
 
 pub fn is_foreground(hwnd: Hwnd) -> bool {
     unsafe { GetForegroundWindow() == hwnd.h() }
+}
+
+/// Tamaño de icono pequeño (bandeja) según el DPI del sistema.
+pub fn small_icon_size() -> (u32, u32) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON, SM_CYSMICON};
+    unsafe { (GetSystemMetrics(SM_CXSMICON) as u32, GetSystemMetrics(SM_CYSMICON) as u32) }
 }
 
 pub fn dpi_scale(hwnd: Hwnd) -> f32 {
@@ -272,7 +270,13 @@ pub fn set_autostart(enable: bool) {
             return;
         }
         if enable {
-            if let Ok(exe) = std::env::current_exe() {
+            // La copia instalada (scripts\install.ps1) tiene prioridad sobre la que
+            // se esté ejecutando, p.ej. target\release.
+            let installed = std::env::var_os("LOCALAPPDATA")
+                .map(|d| PathBuf::from(d).join("Programs\\Kero\\kero.exe"))
+                .filter(|p| p.is_file());
+            let exe = installed.or_else(|| std::env::current_exe().ok());
+            if let Some(exe) = exe {
                 let cmd = format!("\"{}\" --hidden", exe.display());
                 let wide: Vec<u16> = cmd.encode_utf16().chain(std::iter::once(0)).collect();
                 let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
@@ -288,7 +292,7 @@ pub fn set_autostart(enable: bool) {
 /// Devuelve `false` si ya hay otra instancia corriendo.
 pub fn acquire_single_instance() -> bool {
     unsafe {
-        match CreateMutexW(None, true, w!("Local\\KeroLauncher.SingleInstance")) {
+        match CreateMutexW(None, true, INSTANCE_MUTEX) {
             Ok(_h) => {
                 let already = windows::Win32::Foundation::GetLastError()
                     == windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
@@ -296,6 +300,38 @@ pub fn acquire_single_instance() -> bool {
                 !already
             }
             Err(_) => true,
+        }
+    }
+}
+
+const QUIT_EVENT: PCWSTR = w!("Local\\KeroLauncher.Quit");
+const INSTANCE_MUTEX: PCWSTR = w!("Local\\KeroLauncher.SingleInstance");
+
+/// Hilo que espera la orden de cierre de otro proceso (instalador/desinstalador).
+pub fn listen_for_quit(on_quit: impl FnOnce() + Send + 'static) {
+    let Ok(ev) = (unsafe { CreateEventW(None, true, false, QUIT_EVENT) }) else { return };
+    let ev = ev.0 as isize;
+    std::thread::spawn(move || {
+        unsafe { WaitForSingleObject(HANDLE(ev as *mut _), INFINITE) };
+        on_quit();
+    });
+}
+
+/// Pide a la instancia abierta que se cierre y espera (máx. 3 s) a que lo haga.
+pub fn quit_running_instance() {
+    unsafe {
+        if let Ok(ev) = OpenEventW(EVENT_MODIFY_STATE, false, QUIT_EVENT) {
+            let _ = SetEvent(ev);
+            let _ = CloseHandle(ev);
+        }
+        for _ in 0..30 {
+            match OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, INSTANCE_MUTEX) {
+                Ok(m) => {
+                    let _ = CloseHandle(m);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(_) => return,
+            }
         }
     }
 }

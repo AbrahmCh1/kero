@@ -59,13 +59,29 @@ url = "https://www.google.com/search?q={q}"
 
 Para agregar carpetas sin editar el archivo: escribe `kero agregar` y elige la carpeta.
 
-## Compilar
+## Instalar
 
-```bash
-cargo build --release
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 ```
 
-El ejecutable queda en `target/release/kero.exe`. `kero.exe --bench chrome` mide el indexado y la búsqueda en consola (sólo en builds de depuración, que tienen consola).
+Compila, firma (si hay certificado) e instala Kero por usuario, sin permisos de administrador, en `%LOCALAPPDATA%\Programs\Kero`. Queda en el menú Inicio y en Configuración › Aplicaciones (editor: ACY Solutions), desde donde se desinstala. Volver a ejecutarlo actualiza la instalación.
+
+### Firma (sólo para este equipo)
+
+Una sola vez, para que Windows muestre "ACY Solutions" en lugar de "Editor desconocido":
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-cert.ps1
+```
+
+Crea un certificado autofirmado de firma de código (clave no exportable) y lo marca como de confianza sólo para tu usuario; Windows pide confirmarlo. En otros equipos la firma no será de confianza: para distribuir hace falta un certificado comercial. Después, `install.ps1` firma automáticamente.
+
+La instalación vive en scripts y no dentro de `kero.exe` a propósito: un exe sin firmar que se copia a sí mismo y se registra dispara la heurística de Defender (`Bearfoos.A!ml`).
+
+## Desarrollo
+
+`cargo build --release` deja el ejecutable en `target/release/kero.exe`. `kero.exe --bench chrome` mide el indexado y la búsqueda en consola (sólo en builds de depuración, que tienen consola). `kero.exe --quit` cierra la instancia abierta.
 
 ## Arquitectura
 

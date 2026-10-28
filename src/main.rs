@@ -26,9 +26,14 @@ fn main() {
         bench(args.get(2).map(String::as_str).unwrap_or("informe"));
         return;
     }
+    if args.iter().any(|a| a == "--quit") {
+        win::quit_running_instance();
+        return;
+    }
     if !win::acquire_single_instance() {
         return;
     }
+    win::listen_for_quit(|| std::process::exit(0));
     let start_hidden = args.iter().any(|a| a == "--hidden");
     let initial_query = args.iter().position(|a| a == "--query").and_then(|i| args.get(i + 1)).cloned();
     let pinned = args.iter().any(|a| a == "--pin");
@@ -114,45 +119,13 @@ fn build_tray(ctx: &egui::Context, signals: &Arc<Signals>) -> Option<tray_icon::
         }
     }));
 
-    let (rgba, size) = tray_pixels();
     TrayIconBuilder::new()
         .with_tooltip("Kero")
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
-        .with_icon(tray_icon::Icon::from_rgba(rgba, size, size).ok()?)
+        .with_icon(tray_icon::Icon::from_resource(1, Some(win::small_icon_size())).ok()?)
         .build()
         .ok()
-}
-
-/// Icono de bandeja dibujado por código: cuadrado redondeado con una lupa.
-fn tray_pixels() -> (Vec<u8>, u32) {
-    const N: u32 = 32;
-    let accent = win::accent_color().unwrap_or([0, 120, 212]);
-    let mut px = vec![0u8; (N * N * 4) as usize];
-    let cov = |d: f32| (0.5 - d).clamp(0.0, 1.0);
-    for y in 0..N {
-        for x in 0..N {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            // Cuadrado redondeado
-            let (hw, r) = (15.0, 7.0);
-            let qx = (fx - 16.0).abs() - (hw - r);
-            let qy = (fy - 16.0).abs() - (hw - r);
-            let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r;
-            let bg = cov(outside);
-            // Lupa: anillo + mango
-            let ring = (((fx - 14.0).powi(2) + (fy - 14.0).powi(2)).sqrt() - 6.5).abs() - 1.6;
-            let (ax, ay, bx, by) = (18.8, 18.8, 24.0, 24.0);
-            let t = (((fx - ax) * (bx - ax) + (fy - ay) * (by - ay)) / ((bx - ax).powi(2) + (by - ay).powi(2))).clamp(0.0, 1.0);
-            let handle = ((fx - (ax + t * (bx - ax))).powi(2) + (fy - (ay + t * (by - ay))).powi(2)).sqrt() - 1.9;
-            let fg = cov(ring).max(cov(handle));
-            let i = ((y * N + x) * 4) as usize;
-            for c in 0..3 {
-                px[i + c] = (accent[c] as f32 * (1.0 - fg) + 255.0 * fg) as u8;
-            }
-            px[i + 3] = (bg * 255.0) as u8;
-        }
-    }
-    (px, N)
 }
 
 /// `kero --bench <consulta>`: mide indexado y búsqueda sin UI.
