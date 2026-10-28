@@ -263,6 +263,11 @@ impl KeroApp {
     }
 
     fn show(&mut self, ctx: &egui::Context) {
+        if self.hotkey.error.is_some() {
+            // El atajo pudo estar ocupado al arrancar (p. ej. por PowerToys) y liberarse después.
+            let spec = self.s.cfg.read().hotkey.clone();
+            self.hotkey.set(&spec);
+        }
         self.reload_config_if_changed(ctx);
         self.query.clear();
         self.items.clear();
