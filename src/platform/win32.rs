@@ -299,22 +299,32 @@ pub fn acquire_single_instance() -> bool {
 const INSTANCE_MUTEX: PCWSTR = w!("Local\\KeroLauncher.SingleInstance");
 const QUIT_EVENT: PCWSTR = w!("Local\\KeroLauncher.Quit");
 const TOGGLE_EVENT: PCWSTR = w!("Local\\KeroLauncher.Toggle");
+/// Mensajes con datos: el contenido va en `ipc.msg` y este evento avisa.
+const MESSAGE_EVENT: PCWSTR = w!("Local\\KeroLauncher.Message");
 
-/// Escucha órdenes de otros procesos de Kero (`--quit`, `--toggle`, segundo arranque).
+fn mailbox() -> PathBuf {
+    crate::config::data_dir().join("ipc.msg")
+}
+
+/// Escucha órdenes de otros procesos de Kero (`--quit`, `toggle`, `kero "texto"`, …).
 pub fn ipc_listen(handler: impl Fn(Ipc) + Send + 'static) {
-    let (Ok(quit), Ok(toggle)) = (unsafe { CreateEventW(None, false, false, QUIT_EVENT) }, unsafe {
-        CreateEventW(None, false, false, TOGGLE_EVENT)
-    }) else {
-        return;
-    };
-    let (q, t) = (quit.0 as isize, toggle.0 as isize);
+    let events = [QUIT_EVENT, TOGGLE_EVENT, MESSAGE_EVENT].map(|n| unsafe { CreateEventW(None, false, false, n) });
+    let [Ok(q), Ok(t), Ok(m)] = events else { return };
+    let raw = [q.0 as isize, t.0 as isize, m.0 as isize];
     std::thread::spawn(move || {
-        let handles = [HANDLE(q as *mut _), HANDLE(t as *mut _)];
+        let handles = raw.map(|h| HANDLE(h as *mut _));
         loop {
             let r = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
             match r.0 {
                 0 => handler(Ipc::Quit),
                 1 => handler(Ipc::Toggle),
+                2 => {
+                    let text = std::fs::read_to_string(mailbox()).unwrap_or_default();
+                    let _ = std::fs::remove_file(mailbox());
+                    if let Some(msg) = Ipc::decode(&text) {
+                        handler(msg);
+                    }
+                }
                 _ => return,
             }
         }
@@ -326,16 +336,17 @@ pub fn ipc_send(msg: Ipc) -> bool {
     let name = match msg {
         Ipc::Quit => QUIT_EVENT,
         Ipc::Toggle => TOGGLE_EVENT,
+        _ => MESSAGE_EVENT,
     };
     unsafe {
-        match OpenEventW(EVENT_MODIFY_STATE, false, name) {
-            Ok(ev) => {
-                let _ = SetEvent(ev);
-                let _ = CloseHandle(ev);
-                true
-            }
-            Err(_) => false,
+        let Ok(ev) = OpenEventW(EVENT_MODIFY_STATE, false, name) else { return false };
+        let ok = !matches!(msg, Ipc::Show(_) | Ipc::Reindex | Ipc::Copy(_))
+            || std::fs::write(mailbox(), msg.encode()).is_ok();
+        if ok {
+            let _ = SetEvent(ev);
         }
+        let _ = CloseHandle(ev);
+        ok
     }
 }
 
@@ -421,4 +432,263 @@ pub fn font_candidates() -> [Vec<PathBuf>; 3] {
         vec![dir.join("seguisb.ttf")],
         vec![dir.join("SegoeIcons.ttf"), dir.join("segmdl2.ttf")],
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Red, portapapeles y consola.
+
+/// GET por HTTPS con WinHTTP (usa el proxy del sistema). `None` si falla o no responde 200.
+pub fn http_get(url: &str) -> Option<Vec<u8>> {
+    use windows::Win32::Networking::WinHttp::*;
+    let rest = url.strip_prefix("https://")?;
+    let (host, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
+    let close = |h: *mut core::ffi::c_void| unsafe {
+        if !h.is_null() {
+            let _ = WinHttpCloseHandle(h);
+        }
+    };
+    unsafe {
+        let session = WinHttpOpen(w!("Kero"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0);
+        if session.is_null() {
+            return None;
+        }
+        let _ = WinHttpSetTimeouts(session, 5000, 5000, 5000, 10000);
+        let connect = WinHttpConnect(session, &HSTRING::from(host), INTERNET_DEFAULT_HTTPS_PORT, 0);
+        let request = if connect.is_null() {
+            std::ptr::null_mut()
+        } else {
+            WinHttpOpenRequest(
+                connect,
+                w!("GET"),
+                &HSTRING::from(path),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                std::ptr::null(),
+                WINHTTP_FLAG_SECURE,
+            )
+        };
+        let body = (|| {
+            if request.is_null() {
+                return None;
+            }
+            WinHttpSendRequest(request, None, None, 0, 0, 0).ok()?;
+            WinHttpReceiveResponse(request, std::ptr::null_mut()).ok()?;
+            let mut status = 0u32;
+            let mut len = 4u32;
+            WinHttpQueryHeaders(
+                request,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                PCWSTR::null(),
+                Some(&mut status as *mut u32 as *mut _),
+                &mut len,
+                std::ptr::null_mut(),
+            )
+            .ok()?;
+            if status != 200 {
+                return None;
+            }
+            let mut out = Vec::new();
+            let mut buf = vec![0u8; 16 * 1024];
+            loop {
+                let mut read = 0u32;
+                WinHttpReadData(request, buf.as_mut_ptr() as *mut _, buf.len() as u32, &mut read).ok()?;
+                if read == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..read as usize]);
+            }
+            Some(out)
+        })();
+        close(request);
+        close(connect);
+        close(session);
+        body
+    }
+}
+
+/// Proyecta un archivo en memoria, de sólo lectura y para toda la vida del proceso.
+/// Las páginas son del archivo (compartidas, descartables): no cuentan como memoria
+/// privada, a diferencia de leerlo a un `Vec`.
+pub fn map_file(path: &Path) -> Option<&'static [u8]> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::System::Memory::{CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY};
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len() as usize;
+    if len == 0 {
+        return None;
+    }
+    unsafe {
+        let mapping =
+            CreateFileMappingW(HANDLE(file.as_raw_handle()), None, PAGE_READONLY, 0, 0, PCWSTR::null()).ok()?;
+        let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+        // La vista mantiene viva la proyección; el handle ya no hace falta.
+        let _ = CloseHandle(mapping);
+        if view.Value.is_null() {
+            return None;
+        }
+        Some(std::slice::from_raw_parts(view.Value as *const u8, len))
+    }
+}
+
+/// Desde la terminal: en Windows lo copiado lo guarda el sistema.
+pub fn copy_from_cli(text: &str) -> bool {
+    copy_to_clipboard(text)
+}
+
+/// Abre el portapapeles reintentando: otra app puede tenerlo abierto un instante.
+fn open_clipboard() -> bool {
+    for _ in 0..10 {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    false
+}
+
+pub fn read_clipboard() -> Option<String> {
+    use windows::Win32::System::DataExchange::GetClipboardData;
+    if !open_clipboard() {
+        return None;
+    }
+    let text = unsafe {
+        (|| {
+            let h = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
+            let mem = windows::Win32::Foundation::HGLOBAL(h.0);
+            let ptr = GlobalLock(mem) as *const u16;
+            if ptr.is_null() {
+                return None;
+            }
+            let len = (0..).take_while(|&i| *ptr.add(i) != 0).count();
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            let _ = GlobalUnlock(mem);
+            Some(s)
+        })()
+    };
+    let _ = unsafe { CloseClipboard() };
+    text
+}
+
+/// Los gestores de contraseñas marcan lo que copian para que no quede en historiales.
+fn clipboard_is_private() -> bool {
+    use windows::Win32::System::DataExchange::{
+        GetClipboardData, IsClipboardFormatAvailable, RegisterClipboardFormatW,
+    };
+    unsafe {
+        let exclude = RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing"));
+        let ignore = RegisterClipboardFormatW(w!("Clipboard Viewer Ignore"));
+        if IsClipboardFormatAvailable(exclude).is_ok() || IsClipboardFormatAvailable(ignore).is_ok() {
+            return true;
+        }
+        let history = RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory"));
+        if IsClipboardFormatAvailable(history).is_err() || !open_clipboard() {
+            return false;
+        }
+        let allowed = (|| {
+            let h = GetClipboardData(history).ok()?;
+            let mem = windows::Win32::Foundation::HGLOBAL(h.0);
+            let ptr = GlobalLock(mem) as *const u32;
+            if ptr.is_null() {
+                return None;
+            }
+            let v = *ptr;
+            let _ = GlobalUnlock(mem);
+            Some(v != 0)
+        })();
+        let _ = CloseClipboard();
+        allowed == Some(false)
+    }
+}
+
+type ClipboardCallback = Box<dyn Fn() + Send + Sync>;
+static CLIPBOARD_CHANGED: std::sync::OnceLock<ClipboardCallback> = std::sync::OnceLock::new();
+
+unsafe extern "system" fn clipboard_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, WM_CLIPBOARDUPDATE};
+    if msg == WM_CLIPBOARDUPDATE {
+        if let Some(cb) = CLIPBOARD_CHANGED.get() {
+            cb();
+        }
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Avisa con el texto cada vez que cambia el portapapeles. Usa una ventana de
+/// mensajes con `AddClipboardFormatListener`: no consume CPU mientras no copias.
+pub fn watch_clipboard(on_text: impl Fn(String) + Send + Sync + 'static) {
+    use windows::Win32::System::DataExchange::AddClipboardFormatListener;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG, RegisterClassW, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WNDCLASSW,
+    };
+    let cb = move || {
+        if clipboard_is_private() {
+            return;
+        }
+        if let Some(text) = read_clipboard() {
+            on_text(text);
+        }
+    };
+    if CLIPBOARD_CHANGED.set(Box::new(cb)).is_err() {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("kero-clipboard".into())
+        .spawn(|| unsafe {
+            let Ok(module) = GetModuleHandleW(None) else { return };
+            let class = w!("KeroClipboardListener");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(clipboard_wndproc),
+                hInstance: module.into(),
+                lpszClassName: class,
+                ..Default::default()
+            };
+            RegisterClassW(&wc);
+            let Ok(hwnd) = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class,
+                w!(""),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                Some(module.into()),
+                None,
+            ) else {
+                return;
+            };
+            if AddClipboardFormatListener(hwnd).is_err() {
+                return;
+            }
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                DispatchMessageW(&msg);
+            }
+        })
+        .expect("clipboard thread");
+}
+
+/// Conecta la salida a la consola de quien lanzó Kero (el ejecutable es de ventana).
+pub fn attach_console() {
+    use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
+/// Moneda de la configuración regional de Windows ("MXN", "EUR", …).
+pub fn local_currency() -> String {
+    use windows::Win32::Globalization::{GetLocaleInfoEx, LOCALE_SINTLSYMBOL};
+    let mut buf = [0u16; 16];
+    let n = unsafe { GetLocaleInfoEx(PCWSTR::null(), LOCALE_SINTLSYMBOL, Some(&mut buf)) };
+    let code = String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize]);
+    if code.len() == 3 { code } else { "USD".into() }
 }

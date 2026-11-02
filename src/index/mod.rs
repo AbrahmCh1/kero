@@ -39,7 +39,7 @@ pub struct IndexStatus {
 
 pub enum IndexCmd {
     RebuildAll,
-    Reconfigure(Config),
+    Reconfigure(Box<Config>),
 }
 
 pub fn spawn(
@@ -79,14 +79,45 @@ fn apps_cache() -> PathBuf {
     config::data_dir().join("apps.tsv")
 }
 
+fn walk_options(cfg: &Config) -> files::WalkOptions {
+    files::WalkOptions {
+        exclude: cfg.index.exclude.clone(),
+        exclude_ext: cfg.index.exclude_ext.clone(),
+        skip_hidden: cfg.index.skip_hidden,
+        max_depth: cfg.index.max_depth,
+    }
+}
+
+/// Índice guardado en disco por la última indexación (para la línea de comandos).
+pub fn load_cached(cfg: &Config) -> Index {
+    let roots = cfg
+        .resolved_roots()
+        .into_iter()
+        .filter_map(|r| files::load(&cache_file(&r)).map(|files| Arc::new(RootIndex { root: r, files })))
+        .collect();
+    Index { apps: apps::load(&apps_cache()), roots }
+}
+
+/// Indexa todo de nuevo y guarda la caché, sin hilos ni vigilancia (línea de comandos).
+pub fn rebuild_blocking(cfg: &Config) -> Index {
+    let apps = apps::enumerate();
+    apps::save(&apps, &apps_cache());
+    let opts = walk_options(cfg);
+    let roots = cfg
+        .resolved_roots()
+        .into_iter()
+        .map(|r| {
+            let files = files::build(std::slice::from_ref(&r), &opts);
+            let _ = files::save(&files, &cache_file(&r));
+            Arc::new(RootIndex { root: r, files })
+        })
+        .collect();
+    Index { apps, roots }
+}
+
 impl<F: Fn()> Indexer<F> {
     fn opts(&self) -> files::WalkOptions {
-        files::WalkOptions {
-            exclude: self.cfg.index.exclude.clone(),
-            exclude_ext: self.cfg.index.exclude_ext.clone(),
-            skip_hidden: self.cfg.index.skip_hidden,
-            max_depth: self.cfg.index.max_depth,
-        }
+        walk_options(&self.cfg)
     }
 
     fn publish(&self, f: impl FnOnce(&mut Index)) {
@@ -123,7 +154,7 @@ impl<F: Fn()> Indexer<F> {
                 recv(rx) -> cmd => match cmd {
                     Ok(IndexCmd::RebuildAll) => self.rebuild_all(),
                     Ok(IndexCmd::Reconfigure(cfg)) => {
-                        self.cfg = cfg;
+                        self.cfg = *cfg;
                         self.rebuild_all();
                         self.rewatch();
                     }

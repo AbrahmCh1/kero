@@ -36,6 +36,13 @@ const COMMON: &[Entry] = &[
     e!("Reiniciar", "Sistema", "restart reboot", Glyph::Restart, Action::System(SystemCmd::Restart)),
     e!("Cerrar sesión", "Sistema", "sign out logoff log out", Glyph::SignOut, Action::System(SystemCmd::SignOut)),
     e!("Vaciar papelera", "Sistema", "empty recycle bin trash", Glyph::Trash, Action::System(SystemCmd::EmptyTrash)),
+    e!(
+        "Historial del portapapeles",
+        "Lo último que copiaste · también: cb texto",
+        "clipboard history copiado pegar paste",
+        Glyph::Clipboard,
+        Action::Kero(KeroCmd::ClipboardHistory)
+    ),
     // Kero
     e!(
         "Kero: Reindexar",
@@ -245,6 +252,8 @@ const HELP: &[(&str, &str)] = &[
     ("texto", "Apps, archivos, carpetas y comandos"),
     ("/texto", "Sólo archivos y carpetas"),
     ("=2^10 · 5 km to mi", "Calculadora y unidades (Enter copia)"),
+    ("100 usd a mxn · 50 euros", "Divisas con tasas del día"),
+    ("cb · cb texto", "Historial del portapapeles"),
     (">comando", "Ejecutar en terminal"),
     ("g gatos · yt música", "Búsqueda web por palabra clave"),
     (if cfg!(windows) { "C:\\ruta\\" } else { "~/ruta/" }, "Navegar carpetas (Tab autocompleta)"),

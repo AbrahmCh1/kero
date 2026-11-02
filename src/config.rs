@@ -12,7 +12,10 @@ pub struct Config {
     pub theme: String,
     /// Número máximo de resultados.
     pub max_results: usize,
+    /// Moneda local para convertir ("100 usd" → MXN). "auto" la toma de la región del sistema.
+    pub currency: String,
     pub index: IndexConfig,
+    pub clipboard: ClipboardConfig,
     #[serde(rename = "web")]
     pub web_engines: Vec<WebEngine>,
 }
@@ -33,6 +36,23 @@ pub struct IndexConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClipboardConfig {
+    /// Guardar el historial de lo que copias (sólo texto).
+    pub enabled: bool,
+    /// Entradas que se conservan.
+    pub max_items: usize,
+    /// Atajo global que abre Kero directo en el historial, p.ej. "ctrl+shift+v". Vacío = ninguno.
+    pub hotkey: String,
+}
+
+impl Default for ClipboardConfig {
+    fn default() -> Self {
+        Self { enabled: true, max_items: 50, hotkey: String::new() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebEngine {
     pub keyword: String,
     pub name: String,
@@ -47,7 +67,9 @@ impl Default for Config {
             autostart: false,
             theme: "auto".into(),
             max_results: 40,
+            currency: "auto".into(),
             index: IndexConfig::default(),
+            clipboard: ClipboardConfig::default(),
             web_engines: vec![
                 engine("g", "Google", "https://www.google.com/search?q={q}"),
                 engine("yt", "YouTube", "https://www.youtube.com/results?search_query={q}"),
@@ -171,7 +193,8 @@ impl Config {
     pub fn save(&self) {
         let header = "# Configuración de Kero. Los cambios se aplican al guardar.\n\
                       # roots: carpetas a indexar · exclude: carpetas/archivos a ignorar\n\
-                      # [[web]]: atajos de búsqueda web, p.ej. \"g gatos\"\n\n";
+                      # [[web]]: atajos de búsqueda web, p.ej. \"g gatos\"\n\
+                      # currency: moneda local (\"MXN\", \"EUR\"…) o \"auto\" · [clipboard]: historial del portapapeles\n\n";
         if let Ok(body) = toml::to_string_pretty(self) {
             let _ = std::fs::write(config_path(), format!("{header}{body}"));
         }

@@ -1,6 +1,7 @@
 [package]
 name = "kero"
-version = "0.1.0"
+default-run = "kero"
+version = "0.2.0"
 edition = "2024"
 authors = ["ACY Solutions"]
 description = "Lanzador estilo Spotlight, ligero y rápido, para Windows, macOS y Linux"
@@ -27,10 +28,14 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 tray-icon = "0.26.1"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Networking_WinHttp",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_Console",
     "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Power",
@@ -51,6 +56,10 @@ egui = { version = "0.37", default-features = false, features = ["monochrome_emo
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = "0.26.1"
+# Ya vienen con arboard: vigilar el portapapeles por `changeCount` sin leerlo cada vez.
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSEnumerator"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }

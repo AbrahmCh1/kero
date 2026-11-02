@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 # Zip del release: kero.exe viene junto a este script (ya compilado y, si
 # aplica, firmado en CI). Desde el repositorio: se compila y se firma aquí.
 $exe = Join-Path $PSScriptRoot "kero.exe"
+$console = Join-Path $PSScriptRoot "kero.com"
 if (-not (Test-Path $exe)) {
     $root = Resolve-Path "$PSScriptRoot\.."
     Push-Location $root
@@ -19,10 +20,12 @@ if (-not (Test-Path $exe)) {
         Pop-Location
     }
     $exe = Join-Path $root "target\release\kero.exe"
+    $console = Join-Path $root "target\release\kero-console.exe"
     $hasCert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
         Where-Object { $_.Subject -eq "CN=ACY Solutions" -and $_.NotAfter -gt (Get-Date) }
     if ($hasCert) {
         & "$PSScriptRoot\sign.ps1" -File $exe
+        & "$PSScriptRoot\sign.ps1" -File $console
     } else {
         Write-Warning "Sin certificado: se instala sin firmar (ejecuta scripts\setup-cert.ps1 para firmar)."
     }
@@ -40,6 +43,22 @@ for ($i = 0; ; $i++) {
     catch { if ($i -ge 10) { throw }; Start-Sleep -Milliseconds 300 }
 }
 Copy-Item "$PSScriptRoot\uninstall.ps1" $dir -Force
+
+# `kero` en la terminal: kero.com (consola) junto a kero.exe, y la carpeta en el PATH
+# del usuario. Se edita el registro en crudo para no expandir las %VARIABLES% del PATH.
+if (Test-Path $console) {
+    Copy-Item $console (Join-Path $dir "kero.com") -Force
+}
+$envKey = Get-Item "HKCU:\Environment"
+$userPath = $envKey.GetValue("Path", "", "DoNotExpandEnvironmentNames")
+$parts = @($userPath -split ";" | Where-Object { $_ -ne "" })
+if ($parts -notcontains $dir) {
+    $kind = if ($userPath) { $envKey.GetValueKind("Path") } else { "ExpandString" }
+    Set-ItemProperty -Path "HKCU:\Environment" -Name Path -Value (($parts + $dir) -join ";") -Type $kind
+    # Avisa a Windows del cambio (las terminales nuevas ya ven `kero`).
+    [Environment]::SetEnvironmentVariable("KERO_PATH_REFRESH", "1", "User")
+    [Environment]::SetEnvironmentVariable("KERO_PATH_REFRESH", $null, "User")
+}
 
 # Acceso directo en el menú Inicio
 $lnk = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Kero.lnk"
@@ -79,3 +98,4 @@ if (Get-ItemProperty -Path $run -Name Kero -ErrorAction SilentlyContinue) {
 
 Start-Process $dst
 Write-Host "Kero $version instalado en $dir (menú Inicio y Configuración > Aplicaciones)."
+Write-Host "En una terminal nueva: kero ayuda"

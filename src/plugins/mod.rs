@@ -2,6 +2,7 @@
 //! El motor (`search.rs`) los ordena por `score` y la UI sólo pinta.
 
 pub mod calc;
+pub mod clip;
 pub mod color;
 pub mod launcher;
 pub mod path;
@@ -39,6 +40,7 @@ pub enum Glyph {
     Exit,
     Info,
     Startup,
+    Clipboard,
     #[cfg_attr(not(windows), allow(dead_code))]
     Tasks,
 }
@@ -65,6 +67,7 @@ impl Glyph {
             Glyph::Add => "\u{E710}",
             Glyph::Info => "\u{E946}",
             Glyph::Startup => "\u{E7B5}",
+            Glyph::Clipboard => "\u{E77F}",
             Glyph::Tasks => "\u{E9D9}",
         }
     }
@@ -90,6 +93,7 @@ impl Glyph {
             Glyph::Add => "➕",
             Glyph::Info => "ℹ",
             Glyph::Startup => "🚀",
+            Glyph::Clipboard => "📋",
             Glyph::Tasks => "📊",
         }
     }
@@ -98,6 +102,8 @@ impl Glyph {
 /// Tecla modificadora principal: ⌘ en macOS, Ctrl en el resto.
 pub const MOD_ENTER: &str = if cfg!(target_os = "macos") { "⌘ Enter" } else { "Ctrl Enter" };
 pub const MOD_C: &str = if cfg!(target_os = "macos") { "⌘ C" } else { "Ctrl C" };
+/// Quitar una entrada del historial del portapapeles.
+pub const DELETE: &str = if cfg!(target_os = "macos") { "⇧ ⌫" } else { "Shift Supr" };
 /// Elevar con Shift+Enter sólo existe en Windows (UAC).
 const ADMIN: bool = cfg!(windows);
 
@@ -132,6 +138,9 @@ pub enum KeroCmd {
     OpenConfig,
     AddFolder,
     ToggleAutostart,
+    /// Abre Kero en el historial del portapapeles (`cb `).
+    ClipboardHistory,
+    ClearClipboard,
     Quit,
 }
 
@@ -146,6 +155,8 @@ pub enum Action {
     /// URL o URI (https:, ms-settings:, …)
     Url(String),
     Copy(String),
+    /// Entrada del historial del portapapeles: se copia de nuevo o se quita.
+    Clip(String),
     Shell(String),
     /// Programa + argumentos (en macOS todo se abre por URL o como app).
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -156,7 +167,11 @@ pub enum Action {
 
 impl Action {
     pub fn needs_confirm(&self) -> bool {
-        matches!(self, Action::System(SystemCmd::Shutdown | SystemCmd::Restart | SystemCmd::SignOut))
+        matches!(
+            self,
+            Action::System(SystemCmd::Shutdown | SystemCmd::Restart | SystemCmd::SignOut)
+                | Action::Kero(KeroCmd::ClearClipboard)
+        )
     }
 
     /// Ruta asociada (para "abrir ubicación" y "copiar ruta").
@@ -171,7 +186,7 @@ impl Action {
     /// Texto que copia Ctrl+C.
     pub fn copy_text(&self) -> Option<String> {
         match self {
-            Action::Copy(s) | Action::Url(s) | Action::Shell(s) => Some(s.clone()),
+            Action::Copy(s) | Action::Clip(s) | Action::Url(s) | Action::Shell(s) => Some(s.clone()),
             _ => self.path().map(|p| p.to_string_lossy().into_owned()),
         }
     }
@@ -187,6 +202,7 @@ impl Action {
                 h.push((MOD_ENTER, "Ubicación"));
             }
             Action::Url(_) => h.push((MOD_C, "Copiar")),
+            Action::Clip(_) => h.push((DELETE, "Quitar")),
             Action::Shell(_) if ADMIN => h.push(("Shift Enter", "Admin")),
             _ => {}
         }
@@ -196,7 +212,7 @@ impl Action {
     pub fn primary_label(&self) -> &'static str {
         match self {
             Action::Open(_) | Action::App { .. } | Action::Url(_) => "Abrir",
-            Action::Copy(_) => "Copiar",
+            Action::Copy(_) | Action::Clip(_) => "Copiar",
             _ => "Ejecutar",
         }
     }
@@ -244,6 +260,8 @@ pub enum Mode {
     Shell,
     /// `=expresión`
     Calc,
+    /// `cb texto` — historial del portapapeles
+    Clipboard,
 }
 
 pub struct Query<'a> {
@@ -261,6 +279,7 @@ pub trait Plugin: Send + Sync {
 pub fn all() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(calc::Calc::new()),
+        Box::new(clip::Clip),
         Box::new(color::ColorPlugin),
         Box::new(web::Web),
         Box::new(shell::Shell),

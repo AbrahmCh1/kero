@@ -36,6 +36,8 @@ pub fn parse_mode(raw: &str) -> (Mode, &str) {
         (Mode::Calc, r.trim())
     } else if let Some(r) = t.strip_prefix('/') {
         (Mode::Files, r.trim())
+    } else if let Some(r) = plugins::clip::filter(t) {
+        (Mode::Clipboard, r)
     } else {
         (Mode::All, t.trim_end())
     }
@@ -60,8 +62,10 @@ impl Engine {
             p.query(&q, &mut out);
         }
         out.sort_by_key(|a| std::cmp::Reverse(a.score));
-        // Si hay suficientes coincidencias claras, las dispersas sólo meten ruido.
-        if out.iter().filter(|i| !i.weak).count() >= 6 {
+        // Si hay suficientes coincidencias claras (o una respuesta directa, como un
+        // cálculo), las dispersas sólo meten ruido.
+        let answered = out.first().is_some_and(|i| i.score >= 10_000);
+        if answered || out.iter().filter(|i| !i.weak).count() >= 6 {
             out.retain(|i| !i.weak);
         }
         // Mismo destino desde dos fuentes (p.ej. un .lnk en Escritorio y la app): conserva el primero.

@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "kero"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "crossbeam-channel",
@@ -1329,6 +1329,9 @@ dependencies = [
  "global-hotkey",
  "notify",
  "nucleo-matcher",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "parking_lot 0.13.0",
  "raw-window-handle",
  "rayon",

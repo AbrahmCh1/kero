@@ -12,7 +12,49 @@ use std::collections::HashMap;
 struct Texture {
     w: usize,
     h: usize,
-    px: Vec<Color32>,
+    px: Pixels,
+}
+
+/// El atlas de fuentes es blanco con alfa premultiplicado (r = g = b = a): basta un
+/// canal, 4 veces menos memoria. Cualquier otra imagen se guarda completa.
+enum Pixels {
+    Alpha(Vec<u8>),
+    Rgba(Vec<Color32>),
+}
+
+fn is_gray(c: &Color32) -> bool {
+    let [r, g, b, a] = c.to_array();
+    r == a && g == a && b == a
+}
+
+impl Pixels {
+    fn new(src: &[Color32]) -> Self {
+        if src.iter().all(is_gray) {
+            Pixels::Alpha(src.iter().map(|c| c.a()).collect())
+        } else {
+            Pixels::Rgba(src.to_vec())
+        }
+    }
+
+    fn write(&mut self, at: usize, src: &[Color32]) {
+        if let Pixels::Alpha(a) = self
+            && !src.iter().all(is_gray)
+        {
+            *self = Pixels::Rgba(a.iter().map(|&v| Color32::from_rgba_premultiplied(v, v, v, v)).collect());
+        }
+        match self {
+            Pixels::Alpha(a) => a[at..at + src.len()].iter_mut().zip(src).for_each(|(d, s)| *d = s.a()),
+            Pixels::Rgba(p) => p[at..at + src.len()].copy_from_slice(src),
+        }
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> [u8; 4] {
+        match self {
+            Pixels::Alpha(a) => [a[i]; 4],
+            Pixels::Rgba(p) => p[i].to_array(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -36,7 +78,7 @@ impl Raster {
                 let [w, h] = img.size;
                 match d.pos {
                     None => {
-                        self.textures.insert(*id, Texture { w, h, px: img.pixels.clone() });
+                        self.textures.insert(*id, Texture { w, h, px: Pixels::new(&img.pixels) });
                     }
                     Some([x, y]) => {
                         if let Some(t) = self.textures.get_mut(id) {
@@ -44,7 +86,7 @@ impl Raster {
                                 let dst = (y + row) * t.w + x;
                                 let src = row * w;
                                 if y + row < t.h && x + w <= t.w {
-                                    t.px[dst..dst + w].copy_from_slice(&img.pixels[src..src + w]);
+                                    t.px.write(dst, &img.pixels[src..src + w]);
                                 }
                             }
                         }
@@ -91,7 +133,7 @@ fn sample(t: &Texture, u: f32, v: f32) -> [f32; 4] {
     let (x0, y0) = (x as usize, y as usize);
     let (x1, y1) = ((x0 + 1).min(t.w - 1), (y0 + 1).min(t.h - 1));
     let (fx, fy) = (x - x0 as f32, y - y0 as f32);
-    let p = |x: usize, y: usize| t.px[y * t.w + x].to_array();
+    let p = |x: usize, y: usize| t.px.get(y * t.w + x);
     let (a, b, c, d) = (p(x0, y0), p(x1, y0), p(x0, y1), p(x1, y1));
     let mut out = [0.0; 4];
     for i in 0..4 {

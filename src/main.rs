@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cli;
+mod clipboard;
+mod commands;
 mod config;
 mod host;
 mod hotkey;
@@ -8,6 +11,7 @@ mod index;
 mod platform;
 mod plugins;
 mod raster;
+mod rates;
 mod search;
 mod ui;
 mod usage;
@@ -26,25 +30,23 @@ fn main() {
         bench(args.get(2).map(String::as_str).unwrap_or("informe"));
         return;
     }
-    if has("--version") {
-        println!("kero {}", env!("CARGO_PKG_VERSION"));
-        return;
+    // Subcomandos de terminal (`kero buscar …`, `kero calc …`): responden y terminan.
+    if let Some(code) = cli::run(&args[1..]) {
+        std::process::exit(code);
     }
-    if has("--quit") {
-        if platform::ipc_send(Ipc::Quit) {
-            platform::wait_until_closed();
-        }
-        return;
-    }
+    // `kero texto`: abrir con esa búsqueda.
+    let query = cli::gui_query(&args[1..])
+        .or_else(|| args.iter().position(|a| a == "--query").and_then(|i| args.get(i + 1)).cloned());
     if !platform::acquire_single_instance() {
-        // Ya hay una instancia: un segundo arranque (o `--toggle`) la muestra u oculta.
-        if !has("--hidden") {
+        // Ya hay una instancia: un segundo arranque la muestra (con la búsqueda) u oculta.
+        let shown = query.is_some_and(|q| platform::ipc_send(Ipc::Show(q)));
+        if !shown && !has("--hidden") {
             platform::ipc_send(Ipc::Toggle);
         }
         return;
     }
     let start_hidden = has("--hidden");
-    let initial_query = args.iter().position(|a| a == "--query").and_then(|i| args.get(i + 1)).cloned();
+    let initial_query = query;
     let pinned = has("--pin");
 
     // Pocos hilos bastan: la búsqueda es corta y no queremos picos de memoria.
@@ -55,7 +57,8 @@ fn main() {
     if cfg.autostart {
         platform::set_autostart(true);
     }
-    let hotkey = hotkey::Hotkey::new(&cfg.hotkey);
+    let mut hotkey = hotkey::Hotkey::new(&cfg.hotkey);
+    let clipboard_hotkey_error = hotkey.set_clipboard(&cfg.clipboard.hotkey);
 
     let ctx = egui::Context::default();
     host::run(
@@ -76,10 +79,32 @@ fn main() {
                 let signals = signals.clone();
                 GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
                     if e.state == HotKeyState::Pressed {
-                        signals.toggle.store(true, Ordering::Relaxed);
+                        if hotkey::is_clipboard(e.id) {
+                            *signals.show_query.lock() = Some(format!("{} ", plugins::clip::KEYWORD));
+                        } else {
+                            signals.toggle.store(true, Ordering::Relaxed);
+                        }
                         crate::host::wake();
                     }
                 }));
+            }
+            {
+                let signals = signals.clone();
+                rates::on_update(move || {
+                    signals.requery.store(true, Ordering::Relaxed);
+                    crate::host::wake();
+                });
+            }
+            if cfg.read().clipboard.enabled {
+                let signals = signals.clone();
+                let cfg = cfg.clone();
+                platform::watch_clipboard(move |text| {
+                    let c = cfg.read().clipboard.clone();
+                    if c.enabled && clipboard::push(text, c.max_items) {
+                        signals.requery.store(true, Ordering::Relaxed);
+                        crate::host::wake();
+                    }
+                });
             }
             {
                 let signals = signals.clone();
@@ -93,6 +118,17 @@ fn main() {
                         signals.toggle.store(true, Ordering::Relaxed);
                         crate::host::wake();
                     }
+                    Ipc::Show(q) => {
+                        *signals.show_query.lock() = Some(q);
+                        crate::host::wake();
+                    }
+                    Ipc::Reindex => {
+                        signals.tray.lock().push(ui::TrayCmd::Reindex);
+                        crate::host::wake();
+                    }
+                    Ipc::Copy(text) => {
+                        platform::copy_to_clipboard(&text);
+                    }
                 });
             }
 
@@ -101,6 +137,9 @@ fn main() {
             let mut app = ui::KeroApp::new(ctx, shared, scale, hotkey, tray, !start_hidden);
             app.initial_query = initial_query;
             app.pinned = pinned;
+            if let Some(err) = clipboard_hotkey_error {
+                app.notify(err);
+            }
             app
         }),
     );

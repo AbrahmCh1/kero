@@ -5,7 +5,7 @@
 use super::Ipc;
 use crate::plugins::SystemCmd;
 use parking_lot::Mutex;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -168,11 +168,167 @@ pub fn run_system(cmd: SystemCmd) {
     }
 }
 
-pub fn copy_to_clipboard(text: &str) -> bool {
-    // En X11 el contenido vive mientras viva el `Clipboard`: lo mantenemos.
+/// En X11 el contenido vive mientras viva el `Clipboard`: lo mantenemos.
+fn clipboard<R>(f: impl FnOnce(&mut arboard::Clipboard) -> Option<R>) -> Option<R> {
     static CLIP: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
     let mut guard = CLIP.get_or_init(|| Mutex::new(arboard::Clipboard::new().ok())).lock();
-    guard.as_mut().is_some_and(|c| c.set_text(text.to_string()).is_ok())
+    guard.as_mut().and_then(f)
+}
+
+pub fn copy_to_clipboard(text: &str) -> bool {
+    clipboard(|c| c.set_text(text.to_string()).ok()).is_some()
+}
+
+/// Copiar desde la terminal, en un proceso que termina enseguida. En Linux lo
+/// copiado muere con quien lo copió: se le pide a la instancia abierta o a
+/// `wl-copy`/`xclip`/`xsel`. En macOS el portapapeles lo guarda el sistema.
+pub fn copy_from_cli(text: &str) -> bool {
+    if MACOS {
+        return copy_to_clipboard(text);
+    }
+    if ipc_send(Ipc::Copy(text.to_string())) {
+        return true;
+    }
+    let tools: &[(&str, &[&str])] = &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["-ib"])];
+    tools.iter().any(|(tool, args)| {
+        Command::new(tool)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+            .and_then(|mut child| {
+                child.stdin.take()?.write_all(text.as_bytes()).ok()?;
+                child.wait().ok()
+            })
+            .is_some_and(|st| st.success())
+    })
+}
+
+pub fn read_clipboard() -> Option<String> {
+    clipboard(|c| c.get_text().ok())
+}
+
+/// Avisa con el texto cuando cambia el portapapeles.
+///
+/// macOS no avisa de cambios, pero lleva un contador (`changeCount`) que cuesta
+/// casi nada consultar: sólo se lee el texto cuando sube, y se descarta lo que los
+/// gestores de contraseñas marcan como oculto o temporal (nspasteboard.org).
+#[cfg(target_os = "macos")]
+pub fn watch_clipboard(on_text: impl Fn(String) + Send + Sync + 'static) {
+    use objc2_app_kit::NSPasteboard;
+    const PRIVATE: &[&str] = &["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"];
+    std::thread::Builder::new()
+        .name("kero-clipboard".into())
+        .spawn(move || {
+            let count = || objc2::rc::autoreleasepool(|_| NSPasteboard::generalPasteboard().changeCount());
+            let mut last = count();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let now = count();
+                if now == last {
+                    continue;
+                }
+                last = now;
+                let private = objc2::rc::autoreleasepool(|_| {
+                    NSPasteboard::generalPasteboard()
+                        .types()
+                        .is_some_and(|types| types.iter().any(|t| PRIVATE.contains(&t.to_string().as_str())))
+                });
+                if !private && let Some(text) = objc2::rc::autoreleasepool(|_| read_clipboard()) {
+                    on_text(text);
+                }
+            }
+        })
+        .expect("clipboard thread");
+}
+
+/// Linux no tiene un aviso común a X11 y Wayland: se compara una vez por segundo
+/// (sólo una huella del texto, para no guardar una copia de algo grande).
+#[cfg(not(target_os = "macos"))]
+pub fn watch_clipboard(on_text: impl Fn(String) + Send + Sync + 'static) {
+    use std::hash::{Hash, Hasher};
+    let fingerprint = |s: &str| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    };
+    std::thread::Builder::new()
+        .name("kero-clipboard".into())
+        .spawn(move || {
+            let mut last = read_clipboard().map(|t| fingerprint(&t));
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let Some(text) = read_clipboard() else { continue };
+                let fp = fingerprint(&text);
+                if last != Some(fp) {
+                    last = Some(fp);
+                    on_text(text);
+                }
+            }
+        })
+        .expect("clipboard thread");
+}
+
+/// Proyecta un archivo en memoria, de sólo lectura y para toda la vida del proceso.
+/// Las páginas son del archivo: el sistema las comparte y las descarta cuando quiere,
+/// así que no cuentan como memoria propia (a diferencia de leerlo a un `Vec`).
+pub fn map_file(path: &Path) -> Option<&'static [u8]> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn mmap(
+            addr: *mut core::ffi::c_void,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            off: i64,
+        ) -> *mut core::ffi::c_void;
+    }
+    const PROT_READ: i32 = 1;
+    const MAP_PRIVATE: i32 = 2;
+    let file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len() as usize;
+    if len == 0 {
+        return None;
+    }
+    let ptr = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, file.as_raw_fd(), 0) };
+    // MAP_FAILED = -1. La proyección sigue válida aunque se cierre el archivo.
+    if ptr as isize == -1 {
+        return None;
+    }
+    Some(unsafe { std::slice::from_raw_parts(ptr as *const u8, len) })
+}
+
+/// GET por HTTPS con `curl` (viene con macOS y casi todas las distribuciones).
+pub fn http_get(url: &str) -> Option<Vec<u8>> {
+    let out = Command::new("curl")
+        .args(["-fsSL", "--max-time", "15", url])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// En macOS y Linux los programas ya escriben en la terminal que los lanzó.
+pub fn attach_console() {}
+
+/// Moneda de la región del usuario (`LANG=es_MX.UTF-8`, o el locale de macOS).
+pub fn local_currency() -> String {
+    let locale = ["LC_ALL", "LC_MONETARY", "LANG"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .find(|v| v.contains('_'))
+        .or_else(|| if MACOS { output("defaults", &["read", "-g", "AppleLocale"]) } else { None })
+        .unwrap_or_default();
+    // "es_MX.UTF-8", "en_US@rg=mxzzzz" (región elegida aparte en macOS).
+    let region = match locale.split_once("@rg=") {
+        Some((_, rg)) => rg.get(..2).unwrap_or("").to_string(),
+        None => locale.split(['.', '@']).next().unwrap_or("").rsplit('_').next().unwrap_or("").to_string(),
+    };
+    super::currency_for_region(&region).to_string()
 }
 
 pub fn system_uses_light_theme() -> bool {
@@ -254,14 +410,12 @@ pub fn acquire_single_instance() -> bool {
 pub fn ipc_listen(handler: impl Fn(Ipc) + Send + 'static) {
     let Some(listener) = LISTENER.get().and_then(|l| l.lock().take()) else { return };
     std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let mut line = String::new();
-            if BufReader::new(stream).read_line(&mut line).is_ok() {
-                match line.trim() {
-                    "quit" => handler(Ipc::Quit),
-                    "toggle" => handler(Ipc::Toggle),
-                    _ => {}
-                }
+        for mut stream in listener.incoming().flatten() {
+            let mut text = String::new();
+            if stream.read_to_string(&mut text).is_ok()
+                && let Some(msg) = Ipc::decode(&text)
+            {
+                handler(msg);
             }
         }
     });
@@ -269,11 +423,7 @@ pub fn ipc_listen(handler: impl Fn(Ipc) + Send + 'static) {
 
 pub fn ipc_send(msg: Ipc) -> bool {
     let Ok(mut s) = UnixStream::connect(socket_path()) else { return false };
-    let line = match msg {
-        Ipc::Quit => "quit\n",
-        Ipc::Toggle => "toggle\n",
-    };
-    s.write_all(line.as_bytes()).is_ok()
+    s.write_all(msg.encode().as_bytes()).is_ok() && s.shutdown(std::net::Shutdown::Write).is_ok()
 }
 
 pub fn wait_until_closed() {
@@ -299,7 +449,25 @@ pub fn pick_folder() -> Option<PathBuf> {
     picked.filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
-pub fn trim_working_set() {}
+/// Oculto un rato: devuelve al sistema la memoria que el asignador tiene libre pero
+/// retenida (lo que en Windows hace `EmptyWorkingSet`).
+pub fn trim_working_set() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut core::ffi::c_void, goal: usize) -> usize;
+        }
+        // Zona nula = todas; meta 0 = todo lo posible.
+        unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        unsafe { malloc_trim(0) };
+    }
+}
 
 /// Fuentes del sistema: (texto, seminegrita, iconos). Los iconos usan los
 /// emoji monocromos que incluye egui.

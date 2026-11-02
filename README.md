@@ -22,7 +22,7 @@
 
 | | Kero (Windows, medido) |
 |---|---|
-| Memoria en reposo | **≈12 MB** privados; <1 MB de working set tras 10 s oculto |
+| Memoria en reposo | **≈10 MB** privados; <1 MB de working set tras 10 s oculto |
 | CPU en reposo | 0 % (sólo se despierta con el atajo) |
 | Búsqueda | **1–2 ms** sobre 50 000 archivos + 250 apps |
 | Indexado | ≈0,5 s para 50 000 archivos; arranque instantáneo desde caché |
@@ -35,6 +35,8 @@ Escrito en Rust. La interfaz se dibuja con un rasterizador propio en CPU, así q
 - **Apps** — todas las del sistema (en Windows también las de Microsoft Store).
 - **Archivos y carpetas** — búsqueda difusa en las carpetas que elijas; el índice se actualiza solo al crear, borrar o renombrar.
 - **Calculadora y unidades** — `1500 * 1.16`, `sqrt(2)`, `5 km to mi`, `0xff to decimal`. **Enter copia el resultado.**
+- **Divisas** — `100 usd a mxn`, `50 euros en dólares`, `0.1 btc`; sólo con la moneda (`100 usd`) convierte a la tuya. Tasas diarias de ~200 monedas y cripto, sin cuenta ni clave.
+- **Historial del portapapeles** — `cb` muestra lo último que copiaste (sólo texto); `cb factura` lo filtra. Enter lo vuelve a copiar, `Shift+Supr` lo quita.
 - **Colores** — `#3b82f6` o `rgb(59,130,246)` → HEX, RGB y HSL, listos para copiar.
 - **Navegar rutas** — `D:\Proy` o `~/Doc` lista la carpeta; Tab autocompleta.
 - **Web** — `g gatos`, `yt lofi`, `gh egui`… palabras clave configurables; URLs escritas a mano se abren directo.
@@ -93,20 +95,44 @@ En **Wayland** las apps no pueden registrar atajos globales: crea uno en la conf
 | `chrome`, `factura sat` | Apps, archivos y carpetas |
 | `/informe` | Sólo archivos y carpetas |
 | `=sqrt(2)` | Forzar la calculadora |
+| `100 usd a mxn` | Convertir divisas |
+| `cb`, `cb texto` | Historial del portapapeles |
 | `>ipconfig` | Ejecutar en terminal |
 | `kero` | Reindexar, agregar carpeta, configuración, inicio automático, salir |
 
 Si `Alt+Espacio` ya está ocupado (por ejemplo, por PowerToys Run), Kero usa `Ctrl+Alt+Espacio` y lo avisa.
 
-### Línea de comandos
+### Desde la terminal
+
+El instalador agrega `kero` al PATH (abre una terminal nueva después de instalar). En macOS, enlázalo una vez: `sudo ln -s /Applications/Kero.app/Contents/MacOS/kero /usr/local/bin/kero`.
 
 ```
-kero            abre Kero (si ya está abierto, lo muestra)
-kero --toggle   muestra u oculta la instancia abierta
-kero --hidden   arranca en segundo plano
-kero --quit     cierra la instancia abierta
-kero --version
+kero                       abre Kero (si ya está abierto, lo muestra u oculta)
+kero factura sat           abre Kero con esa búsqueda
+
+kero buscar <texto> [-n N] lista resultados: apps, archivos, comandos
+kero abrir <texto>         abre el primer resultado
+kero calc <expresión>      2^10 · 5 km to mi · 100 usd a mxn
+kero tasas                 actualiza y muestra los tipos de cambio
+kero clip                  historial del portapapeles, numerado
+kero clip 3                vuelve a copiar la entrada 3
+kero clip <texto>          filtra el historial · kero clip borrar lo vacía
+kero copiar [texto]        copia el texto o lo que llegue por la tubería
+kero pegar                 escribe lo que hay en el portapapeles
+kero reindexar             vuelve a indexar
+kero mostrar · salir       muestra/oculta o cierra la instancia abierta
+kero config · version · ayuda
 ```
+
+También en inglés: `search`, `open`, `rates`, `copy`, `paste`, `reindex`, `toggle`, `quit`, `help`. Con una tubería la salida es sólo datos, para encadenar:
+
+```powershell
+kero buscar informe | Select-Object -First 1 | ForEach-Object { code $_ }
+Get-Content notas.txt | kero copiar
+$total = kero calc 1500 usd a mxn # sólo el número, con las tasas del día
+```
+
+En Windows, `kero.com` (consola) va junto a `kero.exe` (ventana): la terminal elige `kero.com`, que espera la respuesta y muestra la salida.
 
 ## Configuración
 
@@ -122,6 +148,12 @@ kero --version
 hotkey = "alt+space"     # p. ej. "ctrl+space", "super+alt+k"
 autostart = false
 theme = "auto"           # auto | dark | light
+currency = "auto"        # moneda local: "MXN", "EUR"… o la de tu región
+
+[clipboard]
+enabled = true           # historial del portapapeles (sólo texto)
+max_items = 50
+hotkey = ""              # atajo directo al historial, p. ej. "ctrl+shift+v"
 
 [index]
 roots = ["~/Desktop", "~/Documents", "~/Downloads", "~/Proyectos"]
@@ -137,6 +169,11 @@ url = "https://www.google.com/search?q={q}"
 
 Para agregar una carpeta sin editar el archivo: escribe `kero agregar` y elígela.
 
+### Privacidad
+
+- **Divisas:** la única conexión de Kero a internet. Descarga las tasas del día de [exchange-api](https://github.com/fawazahmed0/exchange-api) (vía jsDelivr, con copia en Cloudflare) sólo cuando escribes una conversión y las guardadas tienen más de 12 h. No envía lo que escribes.
+- **Portapapeles:** el historial se guarda en tu equipo (`clipboard.txt` en la carpeta de datos de Kero) y se borra al desinstalar. En Windows y macOS no entra lo que los gestores de contraseñas marcan como privado (1Password, Bitwarden, KeePass…). En Linux no hay una marca común: si copias contraseñas a menudo, desactívalo con `[clipboard] enabled = false` o vacíalo con `kero clip borrar`.
+
 ## Estado por plataforma
 
 | | Windows | macOS | Linux |
@@ -147,6 +184,8 @@ Para agregar una carpeta sin editar el archivo: escribe `kero agregar` y elígel
 | Iconos reales de apps y archivos | ✅ | iniciales y glifos | iniciales y glifos |
 | Ventana con sombra y esquinas | ✅ | panel opaco | panel opaco |
 | Inicio automático | ✅ | ✅ (LaunchAgent) | ✅ (XDG autostart) |
+| Historial del portapapeles | ✅ (por eventos, respeta gestores de contraseñas) | ✅ (contador del sistema, respeta gestores de contraseñas) | ✅ (consulta cada 1 s) |
+| `kero` en la terminal | ✅ (en el PATH) | enlace manual | ✅ (`~/.local/bin`) |
 
 Windows es la plataforma principal. macOS y Linux están en **soporte inicial**: se compilan y publican en cada release, pero aún no se han probado a fondo en equipos reales. Los reportes son bienvenidos.
 
@@ -167,6 +206,8 @@ En Windows, `scripts\install.ps1` compila, firma (si existe el certificado de `s
 | `index/` | Apps por sistema y archivos con recorrido paralelo. Cada carpeta se guarda una vez y cada archivo es sólo nombre + carpeta (50 000 archivos ≈ 2,6 MB). Caché binaria por raíz y vigilancia con `notify`. |
 | `search.rs` | Hilo de búsqueda que descarta consultas obsoletas; ordena por coincidencia difusa (nucleo), calidad de coincidencia y frecuencia de uso. |
 | `plugins/` | Un archivo por plugin; todos implementan `Plugin::query`. |
+| `rates.rs`, `clipboard.rs` | Tipos de cambio (descarga perezosa y caché en disco) e historial del portapapeles. |
+| `cli.rs`, `bin/kero-console.rs` | Subcomandos de terminal; en Windows, la consola `kero.com` que los reenvía a `kero.exe`. |
 | `raster.rs`, `host.rs` | egui dibujado por CPU. Windows presenta con `UpdateLayeredWindow` (alfa real); macOS y Linux con softbuffer. Sólo se pinta cuando algo cambia. |
 | `platform/` | La misma API sobre Win32 y sobre macOS/Linux. |
 

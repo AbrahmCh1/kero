@@ -13,6 +13,16 @@ Remove-Item (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Kero.
 Remove-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Kero" -Recurse -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $env:LOCALAPPDATA "Kero") -Recurse -Force -ErrorAction SilentlyContinue
 
+# Quita la carpeta del PATH del usuario (sin expandir las %VARIABLES%).
+$envKey = Get-Item "HKCU:\Environment"
+$userPath = $envKey.GetValue("Path", "", "DoNotExpandEnvironmentNames")
+$parts = @($userPath -split ";" | Where-Object { $_ -ne "" -and $_ -ne $dir })
+if ($userPath -and ($parts -join ";") -ne $userPath) {
+    Set-ItemProperty -Path "HKCU:\Environment" -Name Path -Value ($parts -join ";") -Type $envKey.GetValueKind("Path")
+    [Environment]::SetEnvironmentVariable("KERO_PATH_REFRESH", "1", "User")
+    [Environment]::SetEnvironmentVariable("KERO_PATH_REFRESH", $null, "User")
+}
+
 for ($i = 0; $i -lt 10 -and (Test-Path $dir); $i++) {
     Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path $dir) { Start-Sleep -Milliseconds 300 }

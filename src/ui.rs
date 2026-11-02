@@ -48,6 +48,10 @@ pub enum TrayCmd {
 pub struct Signals {
     pub toggle: AtomicBool,
     pub tray: Mutex<Vec<TrayCmd>>,
+    /// `kero "texto"` desde la terminal: mostrar con esta búsqueda.
+    pub show_query: Mutex<Option<String>>,
+    /// Algo cambió fuera de la búsqueda (tasas, portapapeles): repetirla.
+    pub requery: AtomicBool,
 }
 
 #[derive(Clone, Copy)]
@@ -139,15 +143,25 @@ pub struct KeroApp {
 pub fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let [regular, semi, icons] = platform::font_candidates();
-    // Carga la primera fuente existente de cada lista.
+    // Carga la primera fuente existente de cada lista. Se proyecta en memoria en vez de
+    // leerla: SFNS.ttf (macOS) pesa varios MB que si no contarían como memoria de Kero.
+    let mut loaded: Vec<std::path::PathBuf> = Vec::new();
     let mut load = |name: &str, paths: &[std::path::PathBuf]| -> bool {
-        match paths.iter().find_map(|p| std::fs::read(p).ok()) {
-            Some(bytes) => {
-                fonts.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
-                true
-            }
-            None => false,
+        let Some(path) = paths.iter().find(|p| p.is_file()) else { return false };
+        // El mismo archivo para dos papeles (macOS): una sola copia.
+        if loaded.contains(path) {
+            return false;
         }
+        let data = match platform::map_file(path) {
+            Some(bytes) => egui::FontData::from_static(bytes),
+            None => match std::fs::read(path) {
+                Ok(bytes) => egui::FontData::from_owned(bytes),
+                Err(_) => return false,
+            },
+        };
+        fonts.font_data.insert(name.into(), Arc::new(data));
+        loaded.push(path.clone());
+        true
     };
     let has_ui = load("system", &regular);
     let has_sb = load("system-sb", &semi);
@@ -316,6 +330,11 @@ impl KeroApp {
                 self.toast = Some((err, Instant::now() + Duration::from_secs(6)));
             }
         }
+        if new_cfg.clipboard.hotkey != old.clipboard.hotkey
+            && let Some(err) = self.hotkey.set_clipboard(&new_cfg.clipboard.hotkey)
+        {
+            self.toast = Some((err, Instant::now() + Duration::from_secs(6)));
+        }
         if new_cfg.autostart != old.autostart {
             platform::set_autostart(new_cfg.autostart);
         }
@@ -323,10 +342,15 @@ impl KeroApp {
         let light = wants_light(&new_cfg);
         *self.s.cfg.write() = new_cfg.clone();
         if index_changed {
-            let _ = self.s.indexer.send(IndexCmd::Reconfigure(new_cfg));
+            let _ = self.s.indexer.send(IndexCmd::Reconfigure(Box::new(new_cfg)));
         }
         self.theme = Theme::new(light, platform::accent_color().unwrap_or(DEFAULT_ACCENT));
         apply_style(ctx, &self.theme, light);
+    }
+
+    /// Aviso largo que se ve la próxima vez que se muestra Kero.
+    pub fn notify(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now() + Duration::from_secs(8)));
     }
 
     fn toast(&mut self, msg: impl Into<String>) {
@@ -358,7 +382,7 @@ impl KeroApp {
             Action::Url(u) => {
                 platform::open(u);
             }
-            Action::Copy(text) => {
+            Action::Copy(text) | Action::Clip(text) => {
                 platform::copy_to_clipboard(text);
                 self.toast("Copiado al portapapeles");
                 self.hide_at = Some(Instant::now() + Duration::from_millis(450));
@@ -398,7 +422,7 @@ impl KeroApp {
                         if !c.index.roots.iter().any(|r| config::expand_path(r) == p) {
                             c.index.roots.push(s);
                             c.save();
-                            let _ = indexer.send(IndexCmd::Reconfigure(c.clone()));
+                            let _ = indexer.send(IndexCmd::Reconfigure(Box::new(c.clone())));
                         }
                     }
                 });
@@ -417,11 +441,28 @@ impl KeroApp {
                 let _ = ctx;
                 false
             }
+            KeroCmd::ClipboardHistory => {
+                self.set_query(format!("{} ", crate::plugins::clip::KEYWORD), ctx);
+                false
+            }
+            KeroCmd::ClearClipboard => {
+                crate::clipboard::clear();
+                self.toast("Historial del portapapeles borrado");
+                self.send_query();
+                false
+            }
             KeroCmd::Quit => {
                 self.s.usage.read().save();
                 std::process::exit(0);
             }
         }
+    }
+
+    fn set_query(&mut self, q: String, ctx: &egui::Context) {
+        self.query = q;
+        self.set_cursor_end(ctx);
+        self.focus_input = true;
+        self.send_query();
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -445,11 +486,15 @@ impl KeroApp {
                             | Key::PageUp
                             | Key::PageDown
                     );
-                    if handled {
+                    // Shift+Supr (⇧⌫ en macOS) quita la entrada del historial del portapapeles.
+                    let remove = modifiers.shift
+                        && (k == Key::Delete || (cfg!(target_os = "macos") && k == Key::Backspace))
+                        && self.items.get(self.selected).is_some_and(|i| matches!(i.action, Action::Clip(_)));
+                    if handled || remove {
                         // `command` = ⌘ en macOS, Ctrl en el resto.
-                        actions.push((k, modifiers.command, modifiers.shift));
+                        actions.push((if remove { Key::Delete } else { k }, modifiers.command, modifiers.shift));
                     }
-                    !handled
+                    !(handled || remove)
                 }
                 Event::Copy if !has_selection && !self.items.is_empty() => {
                     actions.push((Key::C, true, false));
@@ -491,6 +536,13 @@ impl KeroApp {
                     if let Some(t) = self.items.get(self.selected).and_then(|i| i.action.copy_text()) {
                         platform::copy_to_clipboard(&t);
                         self.toast("Copiado al portapapeles");
+                    }
+                }
+                Key::Delete => {
+                    if let Some(Action::Clip(t)) = self.items.get(self.selected).map(|i| &i.action) {
+                        crate::clipboard::remove(t);
+                        self.toast("Quitado del historial");
+                        self.send_query();
                     }
                 }
                 _ => {}
@@ -896,6 +948,16 @@ impl KeroApp {
             } else {
                 self.show(ctx);
             }
+        }
+        let show_query = self.s.signals.show_query.lock().take();
+        if let Some(q) = show_query {
+            if !self.visible {
+                self.show(ctx);
+            }
+            self.set_query(q, ctx);
+        }
+        if self.s.signals.requery.swap(false, Ordering::Relaxed) && self.visible && !self.query.is_empty() {
+            self.send_query();
         }
         self.handle_tray(ctx);
         self.poll_results();

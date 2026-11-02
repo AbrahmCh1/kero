@@ -113,20 +113,23 @@ impl Host {
 
         let state = self.state.as_mut().expect("egui state");
         let raw = state.take_egui_input(&window);
-        let out = self.ctx.run_ui(raw, |ui| app.ui(ui));
+        let mut out = self.ctx.run_ui(raw, |ui| app.ui(ui));
         state.handle_platform_output(&window, out.platform_output);
 
         if !ui::LAYERED {
             presenter.fit_height(&window, app.panel_height());
         }
+        // Los cambios de texturas (atlas de fuentes) se aplican siempre, aunque este
+        // fotograma no se pinte: egui no los vuelve a mandar.
+        self.raster.set_textures(&out.textures_delta);
         let size = window.inner_size();
         let (w, h) = (size.width as usize, size.height as usize);
         if w > 0 && h > 0 {
             let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
-            self.raster.set_textures(&out.textures_delta);
             presenter.present(&self.raster, &prims, w, h, out.pixels_per_point);
-            self.raster.free_textures(&out.textures_delta);
         }
+        self.raster.free_textures(&out.textures_delta);
+        out.textures_delta.clear();
 
         if app.take_needs_hide() {
             presenter.hide(&window, el);
@@ -269,8 +272,10 @@ impl Presenter {
         crate::platform::show_and_focus(self.hwnd);
     }
 
-    fn hide(&self, _window: &Window, _el: &ActiveEventLoop) {
+    fn hide(&mut self, _window: &Window, _el: &ActiveEventLoop) {
         crate::platform::hide(self.hwnd);
+        // El mapa de bits de la ventana se rehace al mostrarla (es instantáneo).
+        self.surface = None;
     }
 
     fn fit_height(&self, _window: &Window, _points: f32) {}
@@ -317,13 +322,23 @@ impl Presenter {
         window.focus_window();
     }
 
-    fn hide(&self, window: &Window, _el: &ActiveEventLoop) {
+    fn hide(&mut self, window: &Window, _el: &ActiveEventLoop) {
         window.set_visible(false);
         #[cfg(target_os = "macos")]
         {
             // Devuelve el foco a la app anterior.
             use winit::platform::macos::ActiveEventLoopExtMacOS;
             _el.hide_application();
+        }
+        // La ventana (o su capa en macOS) retiene el último fotograma: en Retina son
+        // varios MB mientras Kero está oculto. Se sustituye por uno de 1×1 píxel; al
+        // mostrarla se pinta de nuevo a tamaño completo antes de hacerla visible.
+        let one = std::num::NonZeroU32::MIN;
+        if self.surface.resize(one, one).is_ok()
+            && let Ok(mut buf) = self.surface.buffer_mut()
+        {
+            buf.fill(0);
+            let _ = buf.present();
         }
     }
 
