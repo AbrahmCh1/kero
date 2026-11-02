@@ -34,6 +34,8 @@ fn main() {
     if let Some(code) = cli::run(&args[1..]) {
         std::process::exit(code);
     }
+    // Antes de crear hilos o reservar memoria: en macOS puede relanzar el proceso.
+    platform::tune_allocator();
     // `kero texto`: abrir con esa búsqueda.
     let query = cli::gui_query(&args[1..])
         .or_else(|| args.iter().position(|a| a == "--query").and_then(|i| args.get(i + 1)).cloned());

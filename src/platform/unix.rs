@@ -449,6 +449,33 @@ pub fn pick_folder() -> Option<PathBuf> {
     picked.filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
+/// Ajusta el asignador de memoria antes de arrancar la interfaz.
+///
+/// macOS: por defecto guarda la memoria liberada para reutilizarla rápido, y tras
+/// usar Kero quedaban ~15 MB libres pero retenidos. Con `MallocSpaceEfficient` se
+/// queda en la mitad (medido: 30 → 14 MB). Sólo se lee al iniciar el proceso, así
+/// que Kero se vuelve a lanzar a sí mismo con la variable (mismo PID, ~ms).
+///
+/// Linux (glibc): una arena por hilo multiplica la memoria retenida; con 2 basta.
+pub fn tune_allocator() {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("MallocSpaceEfficient").is_none()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        use std::os::unix::process::CommandExt;
+        // `exec` sólo vuelve si falla: entonces se sigue sin el ajuste.
+        let _ = Command::new(exe).args(std::env::args_os().skip(1)).env("MallocSpaceEfficient", "1").exec();
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        const M_ARENA_MAX: i32 = -8;
+        unsafe { mallopt(M_ARENA_MAX, 2) };
+    }
+}
+
 /// Oculto un rato: devuelve al sistema la memoria que el asignador tiene libre pero
 /// retenida (lo que en Windows hace `EmptyWorkingSet`).
 pub fn trim_working_set() {

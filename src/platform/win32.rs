@@ -530,6 +530,10 @@ pub fn map_file(path: &Path) -> Option<&'static [u8]> {
     }
 }
 
+/// En Windows el montón del sistema ya devuelve bien la memoria (y `EmptyWorkingSet`
+/// recorta al ocultar): nada que ajustar.
+pub fn tune_allocator() {}
+
 /// Desde la terminal: en Windows lo copiado lo guarda el sistema.
 pub fn copy_from_cli(text: &str) -> bool {
     copy_to_clipboard(text)
