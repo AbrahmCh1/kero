@@ -45,6 +45,13 @@ const COMMON: &[Entry] = &[
     ),
     // Kero
     e!(
+        "Textos guardados",
+        "Firmas, direcciones, respuestas · también: sn texto",
+        "snippets plantillas templates",
+        Glyph::Snippet,
+        Action::Kero(KeroCmd::Snippets)
+    ),
+    e!(
         "Kero: Reindexar",
         "Vuelve a escanear apps y archivos",
         "reindex refresh actualizar",
@@ -253,7 +260,11 @@ const HELP: &[(&str, &str)] = &[
     ("/texto", "Sólo archivos y carpetas"),
     ("=2^10 · 5 km to mi", "Calculadora y unidades (Enter copia)"),
     ("100 usd a mxn · 50 euros", "Divisas con tasas del día"),
-    ("cb · cb texto", "Historial del portapapeles"),
+    ("hora en tokio · 15:00 ny a cdmx", "Zonas horarias"),
+    ("hoy + 90 días · días hasta 24 dic", "Fechas"),
+    ("uuid · contraseña · sha256 · base64 · json", "Herramientas de texto (sin texto: el portapapeles)"),
+    ("cb · cb texto", "Historial del portapapeles (Ctrl+S lo guarda)"),
+    ("sn · sn texto", "Textos guardados"),
     (">comando", "Ejecutar en terminal"),
     ("g gatos · yt música", "Búsqueda web por palabra clave"),
     (if cfg!(windows) { "C:\\ruta\\" } else { "~/ruta/" }, "Navegar carpetas (Tab autocompleta)"),

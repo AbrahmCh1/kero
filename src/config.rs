@@ -18,6 +18,21 @@ pub struct Config {
     pub clipboard: ClipboardConfig,
     #[serde(rename = "web")]
     pub web_engines: Vec<WebEngine>,
+    #[serde(rename = "shortcut", skip_serializing_if = "Vec::is_empty")]
+    pub shortcuts: Vec<Shortcut>,
+}
+
+/// Atajo propio: aparece al buscar `name` y abre `open` o ejecuta `run`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Shortcut {
+    pub name: String,
+    /// Carpeta, archivo, app o URL.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub open: String,
+    /// Comando que se ejecuta en una terminal.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub run: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +94,7 @@ impl Default for Config {
                 engine("tr", "Google Translate", "https://translate.google.com/?sl=auto&tl=es&text={q}"),
                 engine("crates", "crates.io", "https://crates.io/search?q={q}"),
             ],
+            shortcuts: Vec::new(),
         }
     }
 }
@@ -194,7 +210,14 @@ impl Config {
         let header = "# Configuración de Kero. Los cambios se aplican al guardar.\n\
                       # roots: carpetas a indexar · exclude: carpetas/archivos a ignorar\n\
                       # [[web]]: atajos de búsqueda web, p.ej. \"g gatos\"\n\
-                      # currency: moneda local (\"MXN\", \"EUR\"…) o \"auto\" · [clipboard]: historial del portapapeles\n\n";
+                      # currency: moneda local (\"MXN\", \"EUR\"…) o \"auto\" · [clipboard]: historial del portapapeles\n\
+                      # [[shortcut]]: atajos propios. Ejemplos (quita el # para usarlos):\n\
+                      #   [[shortcut]]\n\
+                      #   name = \"Proyectos\"\n\
+                      #   open = \"~/Documents/Proyectos\"   # carpeta, archivo, app o URL\n\
+                      #   [[shortcut]]\n\
+                      #   name = \"Actualizar repos\"\n\
+                      #   run = \"git -C ~/kero pull\"      # comando en una terminal\n\n";
         if let Ok(body) = toml::to_string_pretty(self) {
             let _ = std::fs::write(config_path(), format!("{header}{body}"));
         }

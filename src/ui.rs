@@ -358,7 +358,8 @@ impl KeroApp {
     }
 
     /// Ejecuta el resultado. `alt` = Ctrl (⌘ en macOS): abrir ubicación.
-    /// `shift` = como administrador (sólo Windows).
+    /// `shift` = como administrador (Windows) o, en archivos, terminal en su carpeta.
+    /// Las dos en un archivo: "Abrir con…".
     fn activate(&mut self, idx: usize, alt: bool, shift: bool, ctx: &egui::Context) {
         let Some(item) = self.items.get(idx).cloned() else { return };
         if item.action.needs_confirm() && self.confirm != Some(idx) {
@@ -368,13 +369,14 @@ impl KeroApp {
         let mut hide = true;
         match &item.action {
             Action::None => hide = false,
-            Action::Open(p) => {
-                if alt {
-                    platform::reveal(p);
-                } else {
+            Action::Open(p) => match (alt, shift) {
+                (true, true) => platform::open_with(p),
+                (true, false) => platform::reveal(p),
+                (false, true) => platform::open_terminal(if p.is_dir() { p } else { p.parent().unwrap_or(p) }),
+                (false, false) => {
                     platform::open(&p.to_string_lossy());
                 }
-            }
+            },
             Action::App { id, path } => match (alt, path) {
                 (true, Some(p)) => platform::reveal(std::path::Path::new(p)),
                 _ => platform::launch_app(id, path.as_deref(), shift),
@@ -382,10 +384,15 @@ impl KeroApp {
             Action::Url(u) => {
                 platform::open(u);
             }
-            Action::Copy(text) | Action::Clip(text) => {
+            Action::Copy(text) | Action::Clip(text) | Action::Snippet { text, .. } => {
                 platform::copy_to_clipboard(text);
                 self.toast("Copiado al portapapeles");
                 self.hide_at = Some(Instant::now() + Duration::from_millis(450));
+                hide = false;
+            }
+            Action::Secret(text) => {
+                self.copy_secret(text);
+                self.hide_at = Some(Instant::now() + Duration::from_millis(700));
                 hide = false;
             }
             Action::Shell(cmd) => platform::run_in_terminal(cmd, shift),
@@ -451,10 +458,25 @@ impl KeroApp {
                 self.send_query();
                 false
             }
+            KeroCmd::Snippets => {
+                self.set_query(format!("{} ", crate::plugins::snip::KEYWORD), ctx);
+                false
+            }
+            KeroCmd::EditSnippets => {
+                platform::open(&crate::snippets::ensure_file().to_string_lossy());
+                true
+            }
             KeroCmd::Quit => {
                 self.s.usage.read().save();
                 std::process::exit(0);
             }
+        }
+    }
+
+    fn copy_secret(&mut self, text: &str) {
+        crate::clipboard::ignore(text);
+        if platform::copy_secret(text) {
+            self.toast("Copiada · no queda en ningún historial");
         }
     }
 
@@ -486,15 +508,24 @@ impl KeroApp {
                             | Key::PageUp
                             | Key::PageDown
                     );
-                    // Shift+Supr (⇧⌫ en macOS) quita la entrada del historial del portapapeles.
+                    let selected = self.items.get(self.selected).map(|i| &i.action);
+                    // Shift+Supr (⇧⌫ en macOS) quita la entrada del historial o el texto guardado.
                     let remove = modifiers.shift
                         && (k == Key::Delete || (cfg!(target_os = "macos") && k == Key::Backspace))
-                        && self.items.get(self.selected).is_some_and(|i| matches!(i.action, Action::Clip(_)));
-                    if handled || remove {
+                        && selected.is_some_and(Action::removable);
+                    // Ctrl+S guarda una entrada del historial como texto guardado.
+                    let save = k == Key::S && modifiers.command && matches!(selected, Some(Action::Clip(_)));
+                    // Ctrl+Shift+C copia el archivo (no su ruta).
+                    let copy_file = k == Key::C
+                        && modifiers.command
+                        && modifiers.shift
+                        && matches!(selected, Some(Action::Open(_)));
+                    let ours = handled || remove || save || copy_file;
+                    if ours {
                         // `command` = ⌘ en macOS, Ctrl en el resto.
                         actions.push((if remove { Key::Delete } else { k }, modifiers.command, modifiers.shift));
                     }
-                    !(handled || remove)
+                    !ours
                 }
                 Event::Copy if !has_selection && !self.items.is_empty() => {
                     actions.push((Key::C, true, false));
@@ -532,19 +563,45 @@ impl KeroApp {
                         self.send_query();
                     }
                 }
-                Key::C => {
-                    if let Some(t) = self.items.get(self.selected).and_then(|i| i.action.copy_text()) {
-                        platform::copy_to_clipboard(&t);
-                        self.toast("Copiado al portapapeles");
+                Key::C if shift => {
+                    if let Some(p) = self.items.get(self.selected).and_then(|i| i.action.path()) {
+                        let ok = platform::copy_files(std::slice::from_ref(&p));
+                        self.toast(if ok {
+                            "Archivo copiado: pégalo donde quieras"
+                        } else {
+                            "No se pudo copiar el archivo"
+                        });
                     }
                 }
-                Key::Delete => {
+                Key::C => match self.items.get(self.selected).map(|i| i.action.clone()) {
+                    Some(Action::Secret(t)) => self.copy_secret(&t),
+                    Some(a) => {
+                        if let Some(t) = a.copy_text() {
+                            platform::copy_to_clipboard(&t);
+                            self.toast("Copiado al portapapeles");
+                        }
+                    }
+                    None => {}
+                },
+                Key::S => {
                     if let Some(Action::Clip(t)) = self.items.get(self.selected).map(|i| &i.action) {
+                        let name = crate::snippets::add(t);
+                        self.toast(format!("Guardado como \u{201C}{name}\u{201D} · búscalo con sn"));
+                    }
+                }
+                Key::Delete => match self.items.get(self.selected).map(|i| &i.action) {
+                    Some(Action::Clip(t)) => {
                         crate::clipboard::remove(t);
                         self.toast("Quitado del historial");
                         self.send_query();
                     }
-                }
+                    Some(Action::Snippet { name, .. }) => {
+                        crate::snippets::remove(name);
+                        self.toast("Texto guardado borrado");
+                        self.send_query();
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }

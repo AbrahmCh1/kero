@@ -7,6 +7,7 @@ pub const COMMANDS: &[&[&str]] = &[
     &["abrir", "open", "o"],
     &["calc", "c", "="],
     &["clip", "cb"],
+    &["snip", "sn", "snippets"],
     &["copiar", "copy"],
     &["pegar", "paste"],
     &["tasas", "rates"],

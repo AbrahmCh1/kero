@@ -179,6 +179,64 @@ pub fn copy_to_clipboard(text: &str) -> bool {
     clipboard(|c| c.set_text(text.to_string()).ok()).is_some()
 }
 
+/// Copia marcándolo como privado (nspasteboard.org en macOS, la pista de KDE en
+/// Linux) para que los gestores de portapapeles no lo guarden.
+pub fn copy_secret(text: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    use arboard::SetExtApple;
+    #[cfg(target_os = "linux")]
+    use arboard::SetExtLinux;
+    clipboard(|c| c.set().exclude_from_history().text(text.to_string()).ok()).is_some()
+}
+
+/// Copia archivos para pegarlos en Finder, el gestor de archivos, un correo…
+pub fn copy_files(paths: &[PathBuf]) -> bool {
+    clipboard(|c| c.set().file_list(paths).ok()).is_some()
+}
+
+/// Abre una terminal en `dir`.
+pub fn open_terminal(dir: &Path) {
+    let d = dir.to_string_lossy();
+    if MACOS {
+        spawn("open", &["-a", "Terminal", &d]);
+        return;
+    }
+    let mut candidates: Vec<String> = std::env::var("TERMINAL").into_iter().collect();
+    candidates.extend(
+        [
+            "x-terminal-emulator",
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+            "kitty",
+            "alacritty",
+            "wezterm",
+            "xterm",
+        ]
+        .map(String::from),
+    );
+    for term in candidates {
+        if find_in_path(&term).is_some()
+            && let Ok(mut child) = Command::new(&term)
+                .current_dir(dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return;
+        }
+    }
+}
+
+/// "Abrir con…" no tiene un diálogo común fuera de Windows: se muestra en su carpeta.
+pub fn open_with(path: &Path) {
+    reveal(path);
+}
+
 /// Copiar desde la terminal, en un proceso que termina enseguida. En Linux lo
 /// copiado muere con quien lo copió: se le pide a la instancia abierta o a
 /// `wl-copy`/`xclip`/`xsel`. En macOS el portapapeles lo guarda el sistema.

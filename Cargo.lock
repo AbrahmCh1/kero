@@ -1326,6 +1326,7 @@ dependencies = [
  "egui",
  "egui-winit",
  "fend-core",
+ "getrandom 0.3.4",
  "global-hotkey",
  "notify",
  "nucleo-matcher",

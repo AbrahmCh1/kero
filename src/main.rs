@@ -4,6 +4,7 @@ mod cli;
 mod clipboard;
 mod commands;
 mod config;
+mod digest;
 mod host;
 mod hotkey;
 mod icons;
@@ -13,6 +14,8 @@ mod plugins;
 mod raster;
 mod rates;
 mod search;
+mod snippets;
+mod tz;
 mod ui;
 mod usage;
 

@@ -7,7 +7,11 @@ pub mod color;
 pub mod launcher;
 pub mod path;
 pub mod shell;
+pub mod shortcut;
+pub mod snip;
 pub mod system;
+pub mod text;
+pub mod time;
 pub mod web;
 
 use crate::config::Config;
@@ -41,6 +45,10 @@ pub enum Glyph {
     Info,
     Startup,
     Clipboard,
+    Text,
+    Clock,
+    Calendar,
+    Snippet,
     #[cfg_attr(not(windows), allow(dead_code))]
     Tasks,
 }
@@ -68,6 +76,10 @@ impl Glyph {
             Glyph::Info => "\u{E946}",
             Glyph::Startup => "\u{E7B5}",
             Glyph::Clipboard => "\u{E77F}",
+            Glyph::Text => "\u{E8D2}",
+            Glyph::Clock => "\u{E823}",
+            Glyph::Calendar => "\u{E787}",
+            Glyph::Snippet => "\u{E70B}",
             Glyph::Tasks => "\u{E9D9}",
         }
     }
@@ -94,6 +106,10 @@ impl Glyph {
             Glyph::Info => "ℹ",
             Glyph::Startup => "🚀",
             Glyph::Clipboard => "📋",
+            Glyph::Text => "✏",
+            Glyph::Clock => "🕐",
+            Glyph::Calendar => "📅",
+            Glyph::Snippet => "📝",
             Glyph::Tasks => "📊",
         }
     }
@@ -102,8 +118,10 @@ impl Glyph {
 /// Tecla modificadora principal: ⌘ en macOS, Ctrl en el resto.
 pub const MOD_ENTER: &str = if cfg!(target_os = "macos") { "⌘ Enter" } else { "Ctrl Enter" };
 pub const MOD_C: &str = if cfg!(target_os = "macos") { "⌘ C" } else { "Ctrl C" };
+pub const MOD_S: &str = if cfg!(target_os = "macos") { "⌘ S" } else { "Ctrl S" };
 /// Quitar una entrada del historial del portapapeles.
 pub const DELETE: &str = if cfg!(target_os = "macos") { "⇧ ⌫" } else { "Shift Supr" };
+pub const SHIFT_ENTER: &str = if cfg!(target_os = "macos") { "⇧ Enter" } else { "Shift Enter" };
 /// Elevar con Shift+Enter sólo existe en Windows (UAC).
 const ADMIN: bool = cfg!(windows);
 
@@ -141,6 +159,10 @@ pub enum KeroCmd {
     /// Abre Kero en el historial del portapapeles (`cb `).
     ClipboardHistory,
     ClearClipboard,
+    /// Abre Kero en los textos guardados (`sn `).
+    Snippets,
+    /// Abre `snippets.txt` (creándolo si hace falta).
+    EditSnippets,
     Quit,
 }
 
@@ -157,6 +179,13 @@ pub enum Action {
     Copy(String),
     /// Entrada del historial del portapapeles: se copia de nuevo o se quita.
     Clip(String),
+    /// Se copia sin que quede en ningún historial (contraseñas generadas).
+    Secret(String),
+    /// Texto guardado: se copia o se borra.
+    Snippet {
+        name: String,
+        text: String,
+    },
     Shell(String),
     /// Programa + argumentos (en macOS todo se abre por URL o como app).
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -186,15 +215,25 @@ impl Action {
     /// Texto que copia Ctrl+C.
     pub fn copy_text(&self) -> Option<String> {
         match self {
-            Action::Copy(s) | Action::Clip(s) | Action::Url(s) | Action::Shell(s) => Some(s.clone()),
+            Action::Copy(s)
+            | Action::Clip(s)
+            | Action::Secret(s)
+            | Action::Snippet { text: s, .. }
+            | Action::Url(s)
+            | Action::Shell(s) => Some(s.clone()),
             _ => self.path().map(|p| p.to_string_lossy().into_owned()),
         }
+    }
+
+    /// Se puede quitar de su lista con Shift+Supr (⇧⌫).
+    pub fn removable(&self) -> bool {
+        matches!(self, Action::Clip(_) | Action::Snippet { .. })
     }
 
     pub fn hints(&self) -> Vec<(&'static str, &'static str)> {
         let mut h = vec![("Enter", self.primary_label())];
         match self {
-            Action::Open(_) => h.extend([(MOD_ENTER, "Carpeta"), (MOD_C, "Copiar ruta")]),
+            Action::Open(_) => h.extend([(MOD_ENTER, "Carpeta"), (SHIFT_ENTER, "Terminal"), (MOD_C, "Ruta")]),
             Action::App { path: Some(_), .. } => {
                 if ADMIN {
                     h.push(("Shift Enter", "Admin"));
@@ -202,7 +241,8 @@ impl Action {
                 h.push((MOD_ENTER, "Ubicación"));
             }
             Action::Url(_) => h.push((MOD_C, "Copiar")),
-            Action::Clip(_) => h.push((DELETE, "Quitar")),
+            Action::Clip(_) => h.extend([(MOD_S, "Guardar"), (DELETE, "Quitar")]),
+            Action::Snippet { .. } => h.push((DELETE, "Borrar")),
             Action::Shell(_) if ADMIN => h.push(("Shift Enter", "Admin")),
             _ => {}
         }
@@ -212,7 +252,7 @@ impl Action {
     pub fn primary_label(&self) -> &'static str {
         match self {
             Action::Open(_) | Action::App { .. } | Action::Url(_) => "Abrir",
-            Action::Copy(_) | Action::Clip(_) => "Copiar",
+            Action::Copy(_) | Action::Clip(_) | Action::Secret(_) | Action::Snippet { .. } => "Copiar",
             _ => "Ejecutar",
         }
     }
@@ -262,6 +302,8 @@ pub enum Mode {
     Calc,
     /// `cb texto` — historial del portapapeles
     Clipboard,
+    /// `sn texto` — textos guardados
+    Snippets,
 }
 
 pub struct Query<'a> {
@@ -280,6 +322,10 @@ pub fn all() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(calc::Calc::new()),
         Box::new(clip::Clip),
+        Box::new(snip::Snip),
+        Box::new(text::TextTools),
+        Box::new(time::Time),
+        Box::new(shortcut::Shortcuts),
         Box::new(color::ColorPlugin),
         Box::new(web::Web),
         Box::new(shell::Shell),

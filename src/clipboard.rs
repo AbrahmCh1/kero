@@ -51,9 +51,27 @@ pub fn with_items<R>(f: impl FnOnce(&[Clip]) -> R) -> R {
     with_state(|s| f(&s.items))
 }
 
+/// Huella de algo que Kero copió en privado (una contraseña generada): si el
+/// vigilante lo ve llegar, no lo guarda. En Linux no hay otra forma de saberlo.
+static PRIVATE: Mutex<Option<u64>> = Mutex::new(None);
+
+fn fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+pub fn ignore(text: &str) {
+    *PRIVATE.lock() = Some(fingerprint(text));
+}
+
 /// Añade un texto copiado. `false` si no cambió nada (repetido, vacío o enorme).
 pub fn push(text: String, max_items: usize) -> bool {
     if text.trim().is_empty() || text.len() > MAX_BYTES {
+        return false;
+    }
+    if PRIVATE.lock().is_some_and(|fp| fp == fingerprint(&text)) {
         return false;
     }
     with_state(|s| {

@@ -199,27 +199,81 @@ pub fn reveal(path: &Path) {
     shell_execute(None, "explorer.exe", &arg, None);
 }
 
-pub fn copy_to_clipboard(text: &str) -> bool {
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+/// Abre una terminal en `dir` (Windows Terminal si está, si no `cmd`).
+pub fn open_terminal(dir: &Path) {
+    let d = dir.to_string_lossy();
+    // `"C:\"` escaparía la comilla.
+    let arg = if d.ends_with('\\') { format!("-d \"{d}.\"") } else { format!("-d \"{d}\"") };
+    if !shell_execute(None, "wt.exe", &arg, None) {
+        shell_execute(None, "cmd.exe", "", Some(dir));
+    }
+}
+
+/// El diálogo "Abrir con…" de Windows.
+pub fn open_with(path: &Path) {
+    shell_execute(None, "rundll32.exe", &format!("shell32.dll,OpenAs_RunDLL {}", path.display()), None);
+}
+
+fn utf16z(text: &str) -> Vec<u8> {
+    text.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect()
+}
+
+/// Vacía el portapapeles y pone cada `(formato, bytes)`.
+fn set_clipboard(items: &[(u32, Vec<u8>)]) -> bool {
+    if !open_clipboard() {
+        return false;
+    }
     unsafe {
-        if OpenClipboard(None).is_err() {
-            return false;
-        }
         let _ = EmptyClipboard();
-        let ok = (|| {
-            let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).ok()?;
-            let ptr = GlobalLock(mem) as *mut u16;
-            if ptr.is_null() {
-                return None;
-            }
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
-            let _ = GlobalUnlock(mem);
-            SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(mem.0))).ok()
-        })()
-        .is_some();
+        let ok = items.iter().all(|(format, bytes)| {
+            (|| {
+                let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)).ok()?;
+                let ptr = GlobalLock(mem) as *mut u8;
+                if ptr.is_null() {
+                    return None;
+                }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                let _ = GlobalUnlock(mem);
+                SetClipboardData(*format, Some(HANDLE(mem.0))).ok()
+            })()
+            .is_some()
+        });
         let _ = CloseClipboard();
         ok
     }
+}
+
+fn format_id(name: PCWSTR) -> u32 {
+    unsafe { windows::Win32::System::DataExchange::RegisterClipboardFormatW(name) }
+}
+
+pub fn copy_to_clipboard(text: &str) -> bool {
+    set_clipboard(&[(CF_UNICODETEXT.0 as u32, utf16z(text))])
+}
+
+/// Copia marcándolo como privado, como hacen los gestores de contraseñas: no entra
+/// en el historial de Windows (Win+V), ni en la nube, ni en el de Kero.
+pub fn copy_secret(text: &str) -> bool {
+    let no = 0u32.to_le_bytes().to_vec();
+    set_clipboard(&[
+        (CF_UNICODETEXT.0 as u32, utf16z(text)),
+        (format_id(w!("ExcludeClipboardContentFromMonitorProcessing")), vec![0]),
+        (format_id(w!("CanIncludeInClipboardHistory")), no.clone()),
+        (format_id(w!("CanUploadToCloudClipboard")), no),
+    ])
+}
+
+/// Copia archivos como lo hace el Explorador: se pegan en una carpeta, un correo o un chat.
+pub fn copy_files(paths: &[PathBuf]) -> bool {
+    // DROPFILES { pFiles = 20, pt = (0, 0), fNC = 0, fWide = 1 } y las rutas, cada una con su 0.
+    let mut drop: Vec<u8> = [20u32, 0, 0, 0, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+    for p in paths {
+        drop.extend(utf16z(&p.to_string_lossy()));
+    }
+    drop.extend([0, 0]);
+    const CF_HDROP: u32 = 15;
+    const DROPEFFECT_COPY: u32 = 1;
+    set_clipboard(&[(CF_HDROP, drop), (format_id(w!("Preferred DropEffect")), DROPEFFECT_COPY.to_le_bytes().to_vec())])
 }
 
 const PERSONALIZE: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");

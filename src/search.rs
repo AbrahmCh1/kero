@@ -38,6 +38,8 @@ pub fn parse_mode(raw: &str) -> (Mode, &str) {
         (Mode::Files, r.trim())
     } else if let Some(r) = plugins::clip::filter(t) {
         (Mode::Clipboard, r)
+    } else if let Some(r) = plugins::snip::filter(t) {
+        (Mode::Snippets, r)
     } else {
         (Mode::All, t.trim_end())
     }

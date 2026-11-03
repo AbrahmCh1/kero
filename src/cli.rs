@@ -5,7 +5,7 @@ use crate::commands::command;
 use crate::config::{self, Config};
 use crate::platform::{self, Ipc};
 use crate::plugins::{Action, Item};
-use crate::{clipboard, index, rates, search, usage};
+use crate::{clipboard, index, rates, search, snippets, usage};
 use parking_lot::RwLock;
 use std::io::{IsTerminal, Read, Write};
 use std::sync::Arc;
@@ -36,11 +36,13 @@ Uso:
   kero buscar <texto> [-n N] lista resultados (apps, archivos, comandos)
   kero abrir <texto>         abre el primer resultado
   kero calc <expresión>      calcula: 2^10, 5 km to mi, 100 usd a mxn
+                             también: hora en tokio, hoy + 90 días, uuid, sha256 hola
   kero tasas                 actualiza y muestra los tipos de cambio
   kero clip                  historial del portapapeles (numerado)
   kero clip <n>              vuelve a copiar la entrada n
   kero clip <texto>          filtra el historial
   kero clip borrar           vacía el historial
+  kero snip [n | nombre]     textos guardados: lista, o copia uno
   kero copiar [texto]        copia el texto (o lo que llegue por la tubería)
   kero pegar                 escribe lo que hay en el portapapeles
   kero reindexar             vuelve a indexar apps y archivos
@@ -63,6 +65,7 @@ pub fn run(args: &[String]) -> Option<i32> {
         "abrir" => search_cmd(rest, true),
         "calc" => calc(rest),
         "clip" => clip(rest),
+        "snip" => snip(rest),
         "copiar" => copy(rest),
         "pegar" => paste(),
         "tasas" => show_rates(),
@@ -180,7 +183,9 @@ fn execute(a: &Action) -> bool {
             true
         }
         Action::Url(u) => platform::open(u),
-        Action::Copy(t) | Action::Clip(t) => platform::copy_from_cli(t),
+        Action::Copy(t) | Action::Clip(t) | Action::Secret(t) | Action::Snippet { text: t, .. } => {
+            platform::copy_from_cli(t)
+        }
         Action::Shell(c) => {
             platform::run_in_terminal(c, false);
             true
@@ -203,6 +208,17 @@ fn calc(args: &[String]) -> i32 {
         return fail("uso: kero calc <expresión>   p. ej. kero calc 100 usd a mxn");
     }
     let cfg = Config::load();
+    // Horas, fechas y herramientas de texto (`kero calc hora en tokio`, `kero calc uuid`)
+    // ganan a la calculadora, como en la ventana.
+    if let Some(it) = answer(&expr, &cfg) {
+        if piped() {
+            outln!("{}", it.action.copy_text().unwrap_or(it.title));
+        } else {
+            let detail = it.subtitle.split(" · Enter copia").next().unwrap_or_default();
+            outln!("{}   ({detail})", it.title);
+        }
+        return 0;
+    }
     // En la terminal sí podemos esperar a la red.
     rates::refresh(true, false);
     match crate::plugins::calc::Calc::new().compute(&expr, &cfg.currency) {
@@ -220,6 +236,54 @@ fn calc(args: &[String]) -> i32 {
         None if rates::failed() => fail("no se pudo calcular (¿sin conexión para los tipos de cambio?)"),
         None => fail(&format!("no se pudo calcular \u{201C}{expr}\u{201D}")),
     }
+}
+
+/// Respuesta directa de un plugin que no sea la calculadora (sin índice de archivos).
+fn answer(q: &str, cfg: &Config) -> Option<Item> {
+    let idx: index::SharedIndex = Arc::new(RwLock::new(Arc::new(index::Index::default())));
+    let usage = Arc::new(RwLock::new(usage::Usage::default()));
+    let engine = search::Engine::new(idx, usage, Arc::new(RwLock::new(cfg.clone())));
+    engine.search(q).into_iter().next().filter(|i| i.score > 10_000 && i.action.copy_text().is_some())
+}
+
+fn snip(args: &[String]) -> i32 {
+    let arg = args.join(" ");
+    let arg = arg.trim();
+    let pick = snippets::with_items(|items| match arg.parse::<usize>() {
+        Ok(n) => items.get(n.wrapping_sub(1)).cloned(),
+        Err(_) => items.iter().find(|s| s.name.eq_ignore_ascii_case(arg)).cloned(),
+    });
+    if let Some(s) = pick {
+        if !platform::copy_from_cli(&s.text) {
+            return fail("no se pudo copiar");
+        }
+        if piped() {
+            out!("{}", s.text);
+        } else {
+            outln!("Copiado: {}", s.name);
+        }
+        return 0;
+    }
+    let needle = arg.to_lowercase();
+    let shown = snippets::with_items(|items| {
+        let mut shown = 0;
+        for (i, s) in items.iter().enumerate() {
+            if !needle.is_empty() && !format!("{}\n{}", s.name, s.text).to_lowercase().contains(&needle) {
+                continue;
+            }
+            outln!("{:>4}  {}  {}", i + 1, cell(&s.name, 28), clipboard::preview(&s.text, 60));
+            shown += 1;
+        }
+        shown
+    });
+    if shown == 0 {
+        outln!(
+            "No hay textos guardados{}. Edítalos en {}",
+            if needle.is_empty() { "" } else { " que coincidan" },
+            snippets::ensure_file().display()
+        );
+    }
+    0
 }
 
 fn show_rates() -> i32 {
