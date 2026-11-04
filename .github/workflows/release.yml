@@ -263,3 +263,41 @@ jobs:
             gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
               --title "Kero $VERSION" --generate-notes --verify-tag
           fi
+
+  homebrew:
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: homebrew-cask
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Actualizar Cask de Homebrew
+        run: |
+          checksums="$RUNNER_TEMP/SHA256SUMS.txt"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS.txt --dir "$RUNNER_TEMP"
+          sha256=$(awk -v asset="kero-$VERSION-macos-universal.dmg" '$2 == asset { print $1 }' "$checksums")
+          test -n "$sha256"
+          scripts/update-cask.sh "$VERSION" "$sha256"
+
+      - name: Publicar cambios del Cask
+        run: |
+          if git diff --quiet -- Casks/kero-launcher.rb; then
+            echo "El Cask ya está actualizado."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/kero-launcher.rb
+          git commit -m "Homebrew: actualizar kero-launcher a $VERSION"
+          git pull --rebase origin master
+          git push origin HEAD:master

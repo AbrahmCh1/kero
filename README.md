@@ -68,7 +68,15 @@ Se instala para tu usuario (sin administrador) en `%LOCALAPPDATA%\Programs\Kero`
 
 ### macOS 11 o posterior (Apple Silicon e Intel)
 
-Abre `kero-<versión>-macos-universal.dmg` y arrastra **Kero** a Aplicaciones. Si el release no está notarizado, la primera vez abre Kero con clic derecho → *Abrir*.
+Con Homebrew:
+
+```sh
+brew tap AbrahmCh1/kero https://github.com/AbrahmCh1/kero && brew install --cask AbrahmCh1/kero/kero-launcher
+```
+
+El cask se llama `kero-launcher` porque `kero` ya está ocupado por otra app en Homebrew (que también instala `Kero.app`); la app instalada sigue siendo **Kero**. No instales ambos casks a la vez. Para actualizar: `brew upgrade --cask kero-launcher`.
+
+También puedes instalar a mano: abre `kero-<versión>-macos-universal.dmg` y arrastra **Kero** a Aplicaciones. Si el release no está notarizado, la primera vez abre Kero con clic derecho → *Abrir*.
 
 ### Linux (x86_64 y aarch64)
 
@@ -117,7 +125,7 @@ Si `Alt+Espacio` ya está ocupado (por ejemplo, por PowerToys Run), Kero usa `Ct
 
 ### Desde la terminal
 
-El instalador agrega `kero` al PATH (abre una terminal nueva después de instalar). En macOS, enlázalo una vez: `sudo ln -s /Applications/Kero.app/Contents/MacOS/kero /usr/local/bin/kero`.
+El instalador agrega `kero` al PATH (abre una terminal nueva después de instalar). En macOS, el cask de Homebrew ya lo enlaza. Si instalaste el DMG a mano, enlázalo una vez: `sudo ln -s /Applications/Kero.app/Contents/MacOS/kero /usr/local/bin/kero`.
 
 ```
 kero                       abre Kero (si ya está abierto, lo muestra u oculta)
@@ -217,7 +225,7 @@ ACY Solutions
 | Ventana con sombra y esquinas | ✅ | panel opaco | panel opaco |
 | Inicio automático | ✅ | ✅ (LaunchAgent) | ✅ (XDG autostart) |
 | Historial del portapapeles | ✅ (por eventos, respeta gestores de contraseñas) | ✅ (contador del sistema, respeta gestores de contraseñas) | ✅ (consulta cada 1 s) |
-| `kero` en la terminal | ✅ (en el PATH) | enlace manual | ✅ (`~/.local/bin`) |
+| `kero` en la terminal | ✅ (en el PATH) | Homebrew ✅ · DMG enlace manual | ✅ (`~/.local/bin`) |
 
 Windows es la plataforma principal. macOS y Linux están en **soporte inicial**: se compilan y publican en cada release, pero aún no se han probado a fondo en equipos reales. Los reportes son bienvenidos.
 
@@ -249,7 +257,7 @@ En Windows, `scripts\install.ps1` compila, firma (si existe el certificado de `s
 1. Sube `version` en `Cargo.toml` y haz commit.
 2. Crea y sube el tag: `git tag v0.2.0 && git push origin v0.2.0`.
 
-El workflow [`release.yml`](.github/workflows/release.yml) compila para Windows (x64, arm64), macOS (universal) y Linux (x86_64, aarch64), y publica el release. Firma automáticamente si existen estos secretos en el repositorio:
+El workflow [`release.yml`](.github/workflows/release.yml) compila para Windows (x64, arm64), macOS (universal) y Linux (x86_64, aarch64), y publica el release. Después actualiza `Casks/kero-launcher.rb` en `master` con la versión y el SHA-256 del DMG. Si `master` está protegida, permite escritura al `GITHUB_TOKEN` o usa un PAT. Firma automáticamente si existen estos secretos en el repositorio:
 
 | Secreto | Para |
 |---|---|
