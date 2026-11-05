@@ -13,7 +13,7 @@ cask "kero-launcher" do
   end
 
   conflicts_with cask: "kero"
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
 
   app "Kero.app"
   binary "#{appdir}/Kero.app/Contents/MacOS/kero"
