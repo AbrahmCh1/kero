@@ -76,7 +76,9 @@ brew tap AbrahmCh1/kero https://github.com/AbrahmCh1/kero && brew install --cask
 
 El cask se llama `kero-launcher` porque `kero` ya está ocupado por otra app en Homebrew (que también instala `Kero.app`); la app instalada sigue siendo **Kero**. No instales ambos casks a la vez. Para actualizar: `brew upgrade --cask kero-launcher`.
 
-También puedes instalar a mano: abre `kero-<versión>-macos-universal.dmg` y arrastra **Kero** a Aplicaciones. Si el release no está notarizado, la primera vez abre Kero con clic derecho → *Abrir*.
+También puedes instalar a mano: abre `kero-<versión>-macos-universal.dmg` y arrastra **Kero** a Aplicaciones.
+
+Desde la 0.2.1 está firmado con Developer ID y notarizado por Apple, así que se abre sin avisos de Gatekeeper.
 
 ### Linux (x86_64 y aarch64)
 
@@ -255,7 +257,7 @@ En Windows, `scripts\install.ps1` compila, firma (si existe el certificado de `s
 ### Publicar un release
 
 1. Sube `version` en `Cargo.toml` y haz commit.
-2. Crea y sube el tag: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Crea y sube el tag: `git tag v0.2.1 && git push origin v0.2.1`.
 
 El workflow [`release.yml`](.github/workflows/release.yml) compila para Windows (x64, arm64), macOS (universal) y Linux (x86_64, aarch64), y publica el release. Después actualiza `Casks/kero-launcher.rb` en `master` con la versión y el SHA-256 del DMG. Si `master` está protegida, permite escritura al `GITHUB_TOKEN` o usa un PAT. Firma automáticamente si existen estos secretos en el repositorio:
 

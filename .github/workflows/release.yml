@@ -283,6 +283,13 @@ jobs:
 
       - name: Actualizar Cask de Homebrew
         run: |
+          # Republicar un tag viejo no debe regresar el Cask a esa versión.
+          current=$(sed -n 's/^  version "\(.*\)"/\1/p' Casks/kero-launcher.rb)
+          newest=$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -n 1)
+          if [ "$newest" != "$VERSION" ]; then
+            echo "El Cask ya está en $current; no se regresa a $VERSION."
+            exit 0
+          fi
           checksums="$RUNNER_TEMP/SHA256SUMS.txt"
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS.txt --dir "$RUNNER_TEMP"
           sha256=$(awk -v asset="kero-$VERSION-macos-universal.dmg" '$2 == asset { print $1 }' "$checksums")

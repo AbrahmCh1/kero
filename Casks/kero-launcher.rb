@@ -13,20 +13,22 @@ cask "kero-launcher" do
   end
 
   conflicts_with cask: "kero"
-  depends_on :macos
+  depends_on macos: ">= :big_sur"
 
   app "Kero.app"
   binary "#{appdir}/Kero.app/Contents/MacOS/kero"
 
-  uninstall launchctl: "com.acysolutions.kero",
-            quit:      "com.acysolutions.kero",
-            delete:    "~/Library/LaunchAgents/com.acysolutions.kero.plist"
+  # Sin launchctl ni delete: Homebrew también los ejecuta al actualizar, y
+  # cerraría Kero sin volver a abrirlo y borraría el inicio automático.
+  uninstall quit: "com.acysolutions.kero"
 
-  zap trash: "~/Library/Application Support/Kero"
+  zap trash: [
+    "~/Library/Application Support/Kero",
+    "~/Library/LaunchAgents/com.acysolutions.kero.plist",
+  ]
 
   caveats <<~EOS
     Este cask usa el token "kero-launcher" para no chocar con el cask oficial "kero",
     que es otra app y también instala Kero.app. No instales ambos a la vez.
-    Si el release no está notarizado, la primera vez abre Kero con clic derecho → Abrir.
   EOS
 end
