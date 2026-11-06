@@ -223,7 +223,7 @@ ACY Solutions
 | Apps, archivos, plugins | ✅ | ✅ | ✅ |
 | Atajo global | ✅ | ✅ | X11 ✅ · Wayland vía `kero --toggle` |
 | Icono en bandeja / barra de menús | ✅ | ✅ | — |
-| Iconos reales de apps y archivos | ✅ | iniciales y glifos | iniciales y glifos |
+| Iconos reales de apps y archivos | ✅ | ✅ apps, archivos y carpetas | iniciales y glifos |
 | Ventana con sombra y esquinas | ✅ | panel opaco | panel opaco |
 | Inicio automático | ✅ | ✅ (LaunchAgent) | ✅ (XDG autostart) |
 | Historial del portapapeles | ✅ (por eventos, respeta gestores de contraseñas) | ✅ (contador del sistema, respeta gestores de contraseñas) | ✅ (consulta cada 1 s) |
