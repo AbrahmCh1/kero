@@ -98,6 +98,8 @@ En **Wayland** las apps no pueden registrar atajos globales: crea uno en la conf
 |---|---|
 | `Alt+Espacio` (configurable) | Mostrar / ocultar |
 | `↑` `↓` `RePág` `AvPág` | Moverse por los resultados |
+| `Ctrl+N` · `Ctrl+P` | Siguiente / anterior resultado |
+| `Ctrl+D` | Borrar el carácter a la derecha |
 | `Enter` | Abrir, ejecutar o **copiar** |
 | `Ctrl+Enter` · `⌘+Enter` | Mostrar en la carpeta |
 | `Shift+Enter` | Archivos: abrir una terminal en su carpeta · apps y `>comandos`: como administrador (Windows) |
@@ -108,6 +110,8 @@ En **Wayland** las apps no pueden registrar atajos globales: crea uno en la conf
 | `Shift+Supr` · `⇧+⌫` | Quitar del historial o borrar un texto guardado |
 | `Tab` | Autocompletar rutas |
 | `Esc` | Borrar la búsqueda / ocultar |
+
+En el texto, `Ctrl+A` va al inicio, `Ctrl+E` al final, `Ctrl+B` retrocede y `Ctrl+F` avanza.
 
 | Escribe | Para |
 |---|---|
@@ -174,6 +178,7 @@ hotkey = "alt+space"     # p. ej. "ctrl+space", "super+alt+k"
 autostart = false
 theme = "auto"           # auto | dark | light
 currency = "auto"        # moneda local: "MXN", "EUR"… o la de tu región
+persist_query = false    # conserva la búsqueda al ocultar y la deja seleccionada al reabrir
 
 [clipboard]
 enabled = true           # historial del portapapeles (sólo texto)
@@ -199,6 +204,8 @@ open = "D:\\Proyectos"       # carpeta, archivo, app o URL
 name = "Actualizar repos"
 run = "git -C ~/kero pull"   # se ejecuta en una terminal
 ```
+
+`persist_query` mantiene en memoria lo que escribiste al ocultar Kero y, al reabrir, lo deja seleccionado para reemplazarlo o continuar. No se guarda en disco.
 
 Para agregar una carpeta sin editar el archivo: escribe `kero agregar` y elígela.
 

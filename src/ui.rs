@@ -283,7 +283,10 @@ impl KeroApp {
             self.hotkey.set(&spec);
         }
         self.reload_config_if_changed(ctx);
-        self.query.clear();
+        let persist_query = self.s.cfg.read().persist_query;
+        if !persist_query {
+            self.query.clear();
+        }
         self.items.clear();
         self.selected = 0;
         self.scroll = 0;
@@ -299,6 +302,9 @@ impl KeroApp {
         if let Some(q) = self.initial_query.take() {
             self.query = q;
             self.send_query();
+        } else if persist_query && !self.query.is_empty() {
+            self.send_query();
+            self.select_all_query(ctx);
         }
         ctx.request_repaint();
     }
@@ -307,7 +313,7 @@ impl KeroApp {
         self.needs_hide = true;
         self.needs_show = false;
         self.visible = false;
-        self.query.clear();
+        // La búsqueda se conserva en memoria; show() decide si restaurarla.
         self.items.clear();
         self.generation += 1;
         self.hidden_at = Instant::now();
@@ -495,9 +501,30 @@ impl KeroApp {
 
         let mut actions = Vec::new();
         ctx.input_mut(|i| {
-            i.events.retain(|e| match e {
-                Event::Key { key, pressed: true, modifiers, .. } => {
+            i.events.retain_mut(|e| match e {
+                Event::Key { key, physical_key, pressed: true, modifiers, .. } => {
                     let k = *key;
+                    // Ctrl+N/P navegan los resultados en vez de mover el cursor, y
+                    // Ctrl+D se convierte en Delete para borrar a la derecha.
+                    if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.mac_cmd {
+                        match k {
+                            Key::N => {
+                                actions.push((Key::ArrowDown, false, false));
+                                return false;
+                            }
+                            Key::P => {
+                                actions.push((Key::ArrowUp, false, false));
+                                return false;
+                            }
+                            Key::D => {
+                                *key = Key::Delete;
+                                *physical_key = None;
+                                *modifiers = egui::Modifiers::NONE;
+                                return true;
+                            }
+                            _ => {}
+                        }
+                    }
                     let handled = matches!(
                         k,
                         Key::ArrowUp
@@ -614,6 +641,17 @@ impl KeroApp {
             st.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
             st.store(ctx, id);
         }
+    }
+
+    fn select_all_query(&self, ctx: &egui::Context) {
+        let id = Id::unique("kero-input");
+        // Pide el foco ya: TextEdit colapsa la selección si aún no lo tiene.
+        ctx.memory_mut(|m| m.request_focus(id));
+        let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        let end = egui::text::CCursor::new(self.query.chars().count());
+        let range = egui::text::CCursorRange::two(egui::text::CCursor::new(0), end);
+        st.cursor.set_char_range(Some(range));
+        st.store(ctx, id);
     }
 
     fn select(&mut self, i: usize) {
