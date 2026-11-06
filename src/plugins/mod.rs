@@ -130,7 +130,7 @@ const ADMIN: bool = cfg!(windows);
 pub enum Icon {
     None,
     Glyph(Glyph),
-    /// Icono de app (en Windows, de `shell:AppsFolder`).
+    /// Icono de app (Windows: `shell:AppsFolder`; macOS: ruta del `.app`).
     App(String),
     /// Icono de archivo/carpeta del Shell.
     Path(PathBuf, bool),

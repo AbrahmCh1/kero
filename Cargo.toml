@@ -60,7 +60,16 @@ egui = { version = "0.37", default-features = false, features = ["monochrome_emo
 tray-icon = "0.26.1"
 # Ya vienen con arboard: vigilar el portapapeles por `changeCount` sin leerlo cada vez.
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSPasteboard",
+    "NSWorkspace",
+    "NSImage",
+    "NSBitmapImageRep",
+    "NSImageRep",
+    "NSGraphics",
+    "NSGraphicsContext",
+] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSEnumerator"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
