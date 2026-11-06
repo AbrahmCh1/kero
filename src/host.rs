@@ -347,7 +347,16 @@ impl Presenter {
         let scale = window.scale_factor();
         let current = window.inner_size().height as f64 / scale;
         if (current - points as f64).abs() > 0.5 {
+            // AppKit redimensiona desde el borde inferior: al cambiar la altura,
+            // el borde superior se mueve. Guardarlo y restaurarlo mantiene la
+            // ventana en su sitio al abrirla y cuando aparecen resultados.
+            #[cfg(target_os = "macos")]
+            let position = window.outer_position().ok();
             let _ = window.request_inner_size(LogicalSize::new(ui::WIN_W, points));
+            #[cfg(target_os = "macos")]
+            if let Some(position) = position {
+                window.set_outer_position(position);
+            }
         }
     }
 
