@@ -178,6 +178,7 @@ hotkey = "alt+space"     # p. ej. "ctrl+space", "super+alt+k"
 autostart = false
 theme = "auto"           # auto | dark | light
 currency = "auto"        # moneda local: "MXN", "EUR"… o la de tu región
+persist_query = false    # conserva la búsqueda al ocultar y la deja seleccionada al reabrir
 
 [clipboard]
 enabled = true           # historial del portapapeles (sólo texto)
@@ -203,6 +204,8 @@ open = "D:\\Proyectos"       # carpeta, archivo, app o URL
 name = "Actualizar repos"
 run = "git -C ~/kero pull"   # se ejecuta en una terminal
 ```
+
+`persist_query` mantiene en memoria lo que escribiste al ocultar Kero y, al reabrir, lo deja seleccionado para reemplazarlo o continuar. No se guarda en disco.
 
 Para agregar una carpeta sin editar el archivo: escribe `kero agregar` y elígela.
 

@@ -14,6 +14,8 @@ pub struct Config {
     pub max_results: usize,
     /// Moneda local para convertir ("100 usd" → MXN). "auto" la toma de la región del sistema.
     pub currency: String,
+    /// Conservar la búsqueda al ocultar Kero y seleccionarla al reabrir.
+    pub persist_query: bool,
     pub index: IndexConfig,
     pub clipboard: ClipboardConfig,
     #[serde(rename = "web")]
@@ -83,6 +85,7 @@ impl Default for Config {
             theme: "auto".into(),
             max_results: 40,
             currency: "auto".into(),
+            persist_query: false,
             index: IndexConfig::default(),
             clipboard: ClipboardConfig::default(),
             web_engines: vec![
@@ -211,6 +214,7 @@ impl Config {
                       # roots: carpetas a indexar · exclude: carpetas/archivos a ignorar\n\
                       # [[web]]: atajos de búsqueda web, p.ej. \"g gatos\"\n\
                       # currency: moneda local (\"MXN\", \"EUR\"…) o \"auto\" · [clipboard]: historial del portapapeles\n\
+                      # persist_query: conserva la búsqueda al ocultar y la deja seleccionada al reabrir\n\
                       # [[shortcut]]: atajos propios. Ejemplos (quita el # para usarlos):\n\
                       #   [[shortcut]]\n\
                       #   name = \"Proyectos\"\n\
