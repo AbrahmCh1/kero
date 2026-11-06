@@ -495,9 +495,30 @@ impl KeroApp {
 
         let mut actions = Vec::new();
         ctx.input_mut(|i| {
-            i.events.retain(|e| match e {
-                Event::Key { key, pressed: true, modifiers, .. } => {
+            i.events.retain_mut(|e| match e {
+                Event::Key { key, physical_key, pressed: true, modifiers, .. } => {
                     let k = *key;
+                    // Ctrl+N/P navegan los resultados en vez de mover el cursor, y
+                    // Ctrl+D se convierte en Delete para borrar a la derecha.
+                    if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.mac_cmd {
+                        match k {
+                            Key::N => {
+                                actions.push((Key::ArrowDown, false, false));
+                                return false;
+                            }
+                            Key::P => {
+                                actions.push((Key::ArrowUp, false, false));
+                                return false;
+                            }
+                            Key::D => {
+                                *key = Key::Delete;
+                                *physical_key = None;
+                                *modifiers = egui::Modifiers::NONE;
+                                return true;
+                            }
+                            _ => {}
+                        }
+                    }
                     let handled = matches!(
                         k,
                         Key::ArrowUp
