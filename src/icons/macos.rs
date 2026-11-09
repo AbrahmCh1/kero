@@ -29,11 +29,12 @@ fn key_and_target(icon: &Icon) -> Option<(String, String)> {
         Icon::App(id) => Some((format!("app:{id}"), id.clone())),
         Icon::Path(path, is_dir) => {
             let target = path.to_string_lossy().into_owned();
-            if *is_dir {
+            let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            // Una carpeta con extensión es un paquete (.app, .bundle…) con icono propio.
+            if *is_dir && ext.is_empty() {
                 return Some(("folder".into(), target));
             }
-            let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-            if ext.is_empty() {
+            if *is_dir || ext.is_empty() {
                 Some((format!("path:{}", target.to_lowercase()), target))
             } else {
                 Some((format!("ext:{ext}"), target))

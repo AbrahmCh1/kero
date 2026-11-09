@@ -313,7 +313,10 @@ impl KeroApp {
         self.needs_hide = true;
         self.needs_show = false;
         self.visible = false;
-        // La búsqueda se conserva en memoria; show() decide si restaurarla.
+        // Con persist_query la búsqueda se queda en memoria para el próximo show().
+        if !self.s.cfg.read().persist_query {
+            self.query.clear();
+        }
         self.items.clear();
         self.generation += 1;
         self.hidden_at = Instant::now();

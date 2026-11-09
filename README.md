@@ -111,7 +111,7 @@ En **Wayland** las apps no pueden registrar atajos globales: crea uno en la conf
 | `Tab` | Autocompletar rutas |
 | `Esc` | Borrar la búsqueda / ocultar |
 
-En el texto, `Ctrl+A` va al inicio, `Ctrl+E` al final, `Ctrl+B` retrocede y `Ctrl+F` avanza.
+En macOS, dentro del texto, `Ctrl+A` va al inicio, `Ctrl+E` al final, `Ctrl+B` retrocede y `Ctrl+F` avanza. En Windows y Linux, `Ctrl+A` selecciona todo.
 
 | Escribe | Para |
 |---|---|
